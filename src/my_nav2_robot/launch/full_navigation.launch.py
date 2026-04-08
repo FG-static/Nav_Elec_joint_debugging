@@ -3,8 +3,10 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
-from launch.substitutions import Command, LaunchConfiguration
+from launch_ros.substitutions import FindPackageShare
+from nav2_common.launch import RewrittenYaml
 
 def generate_launch_description():
 
@@ -17,40 +19,44 @@ def generate_launch_description():
     xacro_file = os.path.join(pkg_project_bringup, 'urdf', 'robot.urdf.xacro')
     robot_description = Command(['xacro ', xacro_file])
 
-    # BT XML 路径：动态解析安装后的 share 目录，避免硬编码源码路径
-    bt_xml_file = os.path.join(
-        pkg_project_bringup, 'behaviour_trees', 'test_nav.xml')
+    # BT XML 路径：用 PathJoinSubstitution 在 launch 时动态解析，适配任意安装前缀
+    bt_xml_file = PathJoinSubstitution([
+        FindPackageShare('my_nav2_robot'),
+        'behaviour_trees', 'test_nav.xml'
+    ])
 
-    # 地图路径：默认占位空地图（遥控阶段），切换自主导航时传入真实地图
-    default_map_file = os.path.join(pkg_project_bringup, 'maps', 'empty_map.yaml')
+    # 在 launch 时重写 nav2_params.yaml，把 BT XML 路径注入 bt_navigator 参数
+    # 使用 navigation_launch.py（不含 map_server / amcl），遥控阶段无需地图
+    nav2_params_rewritten = RewrittenYaml(
+        source_file=nav2_params_file,
+        param_rewrites={'default_nav_to_pose_bt_xml': bt_xml_file},
+        convert_types=True
+    )
 
     # 部分变量定义
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
-    map_file = LaunchConfiguration('map', default=default_map_file)
 
     # map -> odom
     static_tf_node = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='static_map_to_odom',
-        arguments=['--x', '0', '--y', '0', '--z', '0', 
-                '--yaw', '0', '--pitch', '0', '--roll', '0', 
-                '--frame-id', 'map', 
+        arguments=['--x', '0', '--y', '0', '--z', '0',
+                '--yaw', '0', '--pitch', '0', '--roll', '0',
+                '--frame-id', 'map',
                 '--child-frame-id', 'odom']
     )
 
-    # 启动必要节点
-    # 带参数启动，例如use_sim_time和params_file
-    nav2_bringup_launch_file = os.path.join(pkg_nav2_bringup, 'launch', 'bringup_launch.py')
+    # navigation_launch.py：只启动导航组件（controller/planner/bt_navigator/behavior 等）
+    # 不含 map_server 和 amcl，避免地图加载失败级联阻塞整个 Nav2 生命周期
+    nav2_navigation_launch_file = os.path.join(pkg_nav2_bringup, 'launch', 'navigation_launch.py')
     nav2_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(nav2_bringup_launch_file),
+        PythonLaunchDescriptionSource(nav2_navigation_launch_file),
         launch_arguments={
             'use_sim_time': use_sim_time,
-            'params_file': nav2_params_file,
+            'params_file': nav2_params_rewritten,  # 注入了 BT XML 路径的重写 YAML
             'use_composition': 'False',
             'autostart': 'True',
-            'map': map_file,                              # 地图路径，遥控阶段用占位空地图
-            'default_nav_to_pose_bt_xml': bt_xml_file,   # BT XML 动态解析，不依赖硬编码路径
         }.items()
     )
     # 启动导航节点
@@ -92,12 +98,6 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'use_sim_time',
             default_value='false'
-        ),
-        DeclareLaunchArgument(
-            'map',
-            default_value=default_map_file,
-            description='地图 YAML 路径。遥控阶段留空地图即可；自主导航阶段传入真实地图：'
-                        'ros2 launch my_nav2_robot full_navigation.launch.py map:=/path/to/map.yaml'
         ),
         static_tf_node,
         nav2_launch,
