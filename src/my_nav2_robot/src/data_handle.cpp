@@ -233,7 +233,7 @@ namespace nav_data_handle {
         nav_msgs::msg::Odometry odom;
         odom.header.stamp = stamp;
         odom.header.frame_id = "odom";
-        odom.child_frame_id = "base_link";
+        odom.child_frame_id = "base_footprint"; // 必须与 TF child frame 和 nav2_params robot_base_frame 一致
 
         odom.pose.pose.position.x = p_.x();
         odom.pose.pose.position.y = p_.y();
@@ -249,6 +249,7 @@ namespace nav_data_handle {
         ps.header.stamp = stamp;
         ps.pose = odom.pose.pose;
         
+        path_.header.frame_id = "odom"; // frame_id 必须设置，否则 RViz 不显示且 Nav2 报警
         path_.header.stamp = stamp;
         path_.poses.push_back(ps);
 
