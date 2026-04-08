@@ -251,6 +251,7 @@ namespace nav_data_handle {
         
         path_.header.frame_id = "odom"; // frame_id 必须设置，否则 RViz 不显示且 Nav2 报警
         path_.header.stamp = stamp;
+        if (path_.poses.size() > 5000) path_.poses.clear();
         path_.poses.push_back(ps);
 
         path_pub_->publish(path_);
