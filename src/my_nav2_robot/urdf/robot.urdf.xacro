@@ -6,8 +6,8 @@
     <xacro:property name="chassis_width" value="0.3"/>
     <xacro:property name="chassis_height" value="0.1"/>
 
-    <!--轮子形态-->
-    <xacro:property name="wheel_radius" value="0.05"/>
+    <!--轮子形态（实车机械参数：轮半径 81.5mm）-->
+    <xacro:property name="wheel_radius" value="0.0815"/>
     <xacro:property name="wheel_width" value="0.025"/>
 
     <!--轮子位置-->

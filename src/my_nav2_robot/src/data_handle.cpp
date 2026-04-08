@@ -146,9 +146,15 @@ namespace nav_data_handle {
         // 麦轮运动学（来自 imu_coordinate.md）：
         //   vx = r/4 * ( w_fl + w_fr + w_rl + w_rr)
         //   vy = r/4 * (-w_fl + w_fr + w_rl - w_rr)
+        //   wz = r/(4*(lx+ly)) * (-w_fl + w_fr - w_rl + w_rr)  （暂未接入 ESKF 观测）
         // wheel_velocity 字段映射：x=fl, y=fr, z=rl, w=rr
-        // 轮半径 r = 0.05m（来自 robot.urdf.xacro）
-        constexpr double kWheel = 0.05 / 4.0;
+        //
+        // 实车机械参数：
+        //   轮半径 r = 81.5mm = 0.0815m
+        //   轮对角线距离 = 425mm → 正方形布局假设 lx=ly=425/(2√2)≈150.3mm
+        //   lx + ly ≈ 300.5mm = 0.3005m（需与电控确认布局是否为正方形）
+        constexpr double kWheel = 0.0815 / 4.0;            // r/4
+        constexpr double kWz    = 0.0815 / (4.0 * 0.3005); // r/(4*(lx+ly))，wz 观测备用
         Eigen::Vector2d base_v;
         base_v[0] = kWheel * ( wheel_v[0] + wheel_v[1] + wheel_v[2] + wheel_v[3]);
         base_v[1] = kWheel * (-wheel_v[0] + wheel_v[1] + wheel_v[2] - wheel_v[3]);
