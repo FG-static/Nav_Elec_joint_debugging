@@ -114,7 +114,7 @@ namespace nav_data_handle {
         p_ = p_ + v_ * dt + 0.5 * (q_ * acc + G_VEC_) * dt * dt;
         v_ = v_ + (q_ * acc + G_VEC_) * dt;
         Eigen::Vector3d dtheta = w * dt;
-        if (dtheta.norm() > 1e-6) {
+        if (dtheta.norm() > 1e-10) {
 
             q_ = q_ * Eigen::Quaterniond(Eigen::AngleAxisd(dtheta.norm(), dtheta.normalized())); // 归一化
         }
@@ -202,8 +202,11 @@ namespace nav_data_handle {
         b_a_ += delta_x_.segment<3>(9);
         b_g_ += delta_x_.segment<3>(12);
         Eigen::Vector3d dtheta = delta_x_.segment<3>(6);
-        Eigen::Quaterniond dq(Eigen::AngleAxisd(dtheta.norm(), dtheta.normalized()));
-        q_ = (q_ * dq).normalized();
+        if (dtheta.norm() > 1e-10) {
+
+            Eigen::Quaterniond dq(Eigen::AngleAxisd(dtheta.norm(), dtheta.normalized()));
+            q_ = (q_ * dq).normalized();
+        }
 
         // 重置
         delta_x_.setZero();
