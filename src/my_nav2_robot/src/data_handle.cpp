@@ -143,11 +143,15 @@ namespace nav_data_handle {
             msg->wheel_velocity.z,
             msg->wheel_velocity.w
         );
+        // 麦轮运动学（来自 imu_coordinate.md）：
+        //   vx = r/4 * ( w_fl + w_fr + w_rl + w_rr)
+        //   vy = r/4 * (-w_fl + w_fr + w_rl - w_rr)
+        // wheel_velocity 字段映射：x=fl, y=fr, z=rl, w=rr
+        // 轮半径 r = 0.05m（来自 robot.urdf.xacro）
+        constexpr double kWheel = 0.05 / 4.0;
         Eigen::Vector2d base_v;
-        base_v[0] = (wheel_v[0] + wheel_v[1] + 
-                     wheel_v[2] + wheel_v[3]) / sqrt(2.0);
-        base_v[1] = (wheel_v[0] - wheel_v[1] - 
-                     wheel_v[2] + wheel_v[3]) / sqrt(2.0);
+        base_v[0] = kWheel * ( wheel_v[0] + wheel_v[1] + wheel_v[2] + wheel_v[3]);
+        base_v[1] = kWheel * (-wheel_v[0] + wheel_v[1] + wheel_v[2] - wheel_v[3]);
         Eigen::Vector3d y = q_ * Eigen::Vector3d(
             base_v[0],
             base_v[1],
