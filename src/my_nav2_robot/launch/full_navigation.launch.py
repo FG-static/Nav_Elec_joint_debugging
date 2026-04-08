@@ -17,8 +17,16 @@ def generate_launch_description():
     xacro_file = os.path.join(pkg_project_bringup, 'urdf', 'robot.urdf.xacro')
     robot_description = Command(['xacro ', xacro_file])
 
+    # BT XML 路径：动态解析安装后的 share 目录，避免硬编码源码路径
+    bt_xml_file = os.path.join(
+        pkg_project_bringup, 'behaviour_trees', 'test_nav.xml')
+
+    # 地图路径：默认占位空地图（遥控阶段），切换自主导航时传入真实地图
+    default_map_file = os.path.join(pkg_project_bringup, 'maps', 'empty_map.yaml')
+
     # 部分变量定义
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
+    map_file = LaunchConfiguration('map', default=default_map_file)
 
     # map -> odom
     static_tf_node = Node(
@@ -37,10 +45,12 @@ def generate_launch_description():
     nav2_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(nav2_bringup_launch_file),
         launch_arguments={
-            'use_sim_time': use_sim_time, 
+            'use_sim_time': use_sim_time,
             'params_file': nav2_params_file,
             'use_composition': 'False',
-            'autostart': 'True'
+            'autostart': 'True',
+            'map': map_file,                              # 地图路径，遥控阶段用占位空地图
+            'default_nav_to_pose_bt_xml': bt_xml_file,   # BT XML 动态解析，不依赖硬编码路径
         }.items()
     )
     # 启动导航节点
@@ -82,6 +92,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'use_sim_time',
             default_value='false'
+        ),
+        DeclareLaunchArgument(
+            'map',
+            default_value=default_map_file,
+            description='地图 YAML 路径。遥控阶段留空地图即可；自主导航阶段传入真实地图：'
+                        'ros2 launch my_nav2_robot full_navigation.launch.py map:=/path/to/map.yaml'
         ),
         static_tf_node,
         nav2_launch,

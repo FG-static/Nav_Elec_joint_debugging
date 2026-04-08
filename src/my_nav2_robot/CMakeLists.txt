@@ -56,6 +56,10 @@ install(DIRECTORY behaviour_trees
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(DIRECTORY maps
+  DESTINATION share/${PROJECT_NAME}
+)
+
 install(DIRECTORY include/
   DESTINATION include/
 )
