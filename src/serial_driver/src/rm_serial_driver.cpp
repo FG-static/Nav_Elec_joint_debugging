@@ -36,6 +36,15 @@ RMSerialDriver::RMSerialDriver(const rclcpp::NodeOptions & options)
 
   getParams();
 
+  // publisher/subscriber 必须在接收线程启动前初始化，否则线程调用 publish() 时
+  // gimbal_pub_ 还是空指针，导致 SIGSEGV
+  target_sub_ = this->create_subscription<rm_interfaces::msg::Target>(
+    "/tracker/target", rclcpp::SensorDataQoS(),
+    std::bind(&RMSerialDriver::sendData, this, std::placeholders::_1));
+
+  gimbal_pub_ = this->create_publisher<rm_interfaces::msg::Gimbal>(
+    "/tracker/gimbal", 10);
+
   try {
     serial_driver_->init_port(device_name_, *device_config_);
     if (!serial_driver_->port()->is_open()) {
@@ -47,16 +56,6 @@ RMSerialDriver::RMSerialDriver(const rclcpp::NodeOptions & options)
       get_logger(), "Error creating serial port: %s - %s", device_name_.c_str(), ex.what());
     throw ex;
   }
-
-
-  //Create Subscription
-  // 参考 - 发布到stm32
-  target_sub_ = this->create_subscription<rm_interfaces::msg::Target>(
-    "/tracker/target", rclcpp::SensorDataQoS(),
-    std::bind(&RMSerialDriver::sendData, this, std::placeholders::_1)); // Best Effort
-
-  gimbal_pub_ = this->create_publisher<rm_interfaces::msg::Gimbal>(
-    "/tracker/gimbal", 10); // Reliable
 }
 
 RMSerialDriver::~RMSerialDriver()
