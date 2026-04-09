@@ -158,11 +158,9 @@ namespace nav_data_handle {
         Eigen::Vector2d base_v;
         base_v[0] = kWheel * ( wheel_v[0] + wheel_v[1] + wheel_v[2] + wheel_v[3]);
         base_v[1] = kWheel * (-wheel_v[0] + wheel_v[1] + wheel_v[2] - wheel_v[3]);
-        Eigen::Vector3d y = q_ * Eigen::Vector3d(
-            base_v[0],
-            base_v[1],
-            0
-        );
+        // 观测量：车体系速度，与 h(x) = R^T * v_ 同一坐标系
+        // z 分量设为 0 作为零速观测，抑制 z 方向漂移
+        Eigen::Vector3d y(base_v[0], base_v[1], 0.0);
         /*
             ^ y
             o > x
