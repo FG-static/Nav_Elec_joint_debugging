@@ -31,7 +31,7 @@ namespace nav_data_handle {
         P_ = Eigen::Matrix<double, 15, 15>::Identity() * 0.01;
         Q_ = Eigen::Matrix<double, 15, 15>::Identity() * 0.001;
         R_ = Eigen::Matrix4d::Identity() * 0.005;
-        R_tilt_ = Eigen::Matrix2d::Identity() * 0.0001; // pitch/roll 零观测置信度高
+        R_tilt_ = Eigen::Matrix2d::Identity() * 0.01; // pitch/roll 零倾斜约束，适度信任
 
         RCLCPP_INFO(this->get_logger(), "ESKF Data Handle Node Initialized");
     }
@@ -230,20 +230,21 @@ namespace nav_data_handle {
         double pitch = -std::asin(std::clamp(R(2, 0), -1.0, 1.0));
         double roll  =  std::atan2(R(2, 1), R(2, 2));
 
-        // 观测量：当前的 pitch 和 roll（目标为 0）
-        Eigen::Vector2d y(pitch, roll);
-        Eigen::Vector2d h_x = Eigen::Vector2d::Zero();  // 目标值：pitch=0, roll=0
+        // ESKF 观测约定：y = 传感器观测, h_x = 名义状态预测
+        // 零倾斜约束："传感器说"倾斜为 0，名义状态的 pitch/roll 是预测值
+        Eigen::Vector2d y = Eigen::Vector2d::Zero();   // 约束：地面水平，pitch=0, roll=0
+        Eigen::Vector2d h_x(pitch, roll);               // 名义状态当前的 pitch/roll
 
         // 雅可比矩阵 H (2×15)
-        // δpitch ≈ δθ_y（绕 y 轴的误差角），δroll ≈ δθ_x（绕 x 轴的误差角）
-        // 在 ESKF 误差状态中，δθ = [δθ_x, δθ_y, δθ_z]
-        // 所以 H 对 δθ 的偏导为：
-        //   ∂pitch/∂δθ = [0, -1, 0]  （pitch 对应 δθ_y，符号取负因为 pitch = -asin(R20)）
-        //   ∂roll/∂δθ  = [1, 0, 0]   （roll 对应 δθ_x）
+        // body frame 右乘扰动：q_true = q_nominal * δq, R_true = R * (I + [δθ]×)
+        // 对 level 机器人（pitch≈0, roll≈0）：
+        //   R_true(2,0) = R(2,0) - R(2,2)*δθ_y → pitch ≈ δθ_y
+        //   R_true(2,1) = R(2,1) + R(2,2)*δθ_x → roll ≈ δθ_x
+        // 关键：body frame 扰动下 Jacobian 不依赖 yaw
         Eigen::Matrix<double, 2, 15> H =
             Eigen::Matrix<double, 2, 15>::Zero();
         H(0, 6) =  0.0;  // ∂pitch/∂δθ_x
-        H(0, 7) = -1.0;  // ∂pitch/∂δθ_y
+        H(0, 7) =  1.0;  // ∂pitch/∂δθ_y （R(2,2)/cos(pitch) ≈ +1）
         H(0, 8) =  0.0;  // ∂pitch/∂δθ_z
         H(1, 6) =  1.0;  // ∂roll/∂δθ_x
         H(1, 7) =  0.0;  // ∂roll/∂δθ_y
