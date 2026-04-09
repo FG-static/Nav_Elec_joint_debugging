@@ -29,9 +29,9 @@ namespace nav_data_handle {
         q_.setIdentity();
         delta_x_.setZero();
         P_ = Eigen::Matrix<double, 15, 15>::Identity() * 0.01;
-        Q_ = Eigen::Matrix<double, 15, 15>::Identity() * 0.001;
+        Q_ = Eigen::Matrix<double, 15, 15>::Identity() * 0.005;
         R_ = Eigen::Matrix4d::Identity() * 0.005;
-        R_tilt_ = Eigen::Matrix2d::Identity() * 0.01; // pitch/roll 零倾斜约束，适度信任
+        R_tilt_ = Eigen::Matrix2d::Identity() * 0.005; // pitch/roll 零倾斜约束，适度信任
 
         RCLCPP_INFO(this->get_logger(), "ESKF Data Handle Node Initialized");
     }
