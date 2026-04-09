@@ -35,6 +35,7 @@ namespace nav_data_handle {
         // ESKF
         void predict(const rm_interfaces::msg::Gimbal::SharedPtr msg, double dt);
         void observeWheel(const rm_interfaces::msg::Gimbal::SharedPtr msg);
+        void observeZeroTilt();
         void injectAndReset();
 
         // 接收 发布
@@ -43,7 +44,6 @@ namespace nav_data_handle {
         rclcpp::Publisher<rm_interfaces::msg::Target>::SharedPtr target_pub_;
         rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
         rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
-        rclcpp::TimerBase::SharedPtr timer_;
         std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     
         // 名义状态
@@ -61,7 +61,8 @@ namespace nav_data_handle {
 
         // 噪声矩阵
         Eigen::Matrix<double, 15, 15> Q_; // 过程噪声
-        Eigen::Matrix3d R_; // 观测噪声 - 观测量 v_x v_y w
+        Eigen::Matrix4d R_; // 观测噪声 - observeWheel 观测量 vx, vy, vz, wz
+        Eigen::Matrix2d R_tilt_; // 观测噪声 - observeZeroTilt 观测量 pitch, roll
 
         // help
         bool initialized = false;

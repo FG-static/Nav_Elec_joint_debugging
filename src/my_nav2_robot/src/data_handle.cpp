@@ -19,13 +19,6 @@ namespace nav_data_handle {
         odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>(
             "/odom", 10
         );
-        timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(20),
-            [this](){
-                auto now = this->now();
-                publishOdometry(now);
-            }
-        );
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(* this);
 
         // 初始化ESKF变量
@@ -37,7 +30,8 @@ namespace nav_data_handle {
         delta_x_.setZero();
         P_ = Eigen::Matrix<double, 15, 15>::Identity() * 0.01;
         Q_ = Eigen::Matrix<double, 15, 15>::Identity() * 0.001;
-        R_ = Eigen::Matrix3d::Identity() * 0.005;
+        R_ = Eigen::Matrix4d::Identity() * 0.005;
+        R_tilt_ = Eigen::Matrix2d::Identity() * 0.0001; // pitch/roll 零观测置信度高
 
         RCLCPP_INFO(this->get_logger(), "ESKF Data Handle Node Initialized");
     }
@@ -65,6 +59,7 @@ namespace nav_data_handle {
         // ESKF
         predict(msg, dt);
         observeWheel(msg);
+        observeZeroTilt();
         injectAndReset();
 
         // visualizer（用 ROS 系统时间戳，保持 TF/Nav2 兼容性）
@@ -146,7 +141,7 @@ namespace nav_data_handle {
         // 麦轮运动学（来自 imu_coordinate.md）：
         //   vx = r/4 * ( w_fl + w_fr + w_rl + w_rr)
         //   vy = r/4 * (-w_fl + w_fr + w_rl - w_rr)
-        //   wz = r/(4*(lx+ly)) * (-w_fl + w_fr - w_rl + w_rr)  （暂未接入 ESKF 观测）
+        //   wz = r/(4*(lx+ly)) * (-w_fl + w_fr - w_rl + w_rr)
         // wheel_velocity 字段映射：x=fl, y=fr, z=rl, w=rr
         //
         // 实车机械参数：
@@ -154,48 +149,120 @@ namespace nav_data_handle {
         //   轮对角线距离 = 425mm → 正方形布局假设 lx=ly=425/(2√2)≈150.3mm
         //   lx + ly ≈ 300.5mm = 0.3005m（需与电控确认布局是否为正方形）
         constexpr double kWheel = 0.0815 / 4.0;            // r/4
-        constexpr double kWz    = 0.0815 / (4.0 * 0.3005); // r/(4*(lx+ly))，wz 观测备用
-        Eigen::Vector2d base_v;
-        base_v[0] = kWheel * ( wheel_v[0] + wheel_v[1] + wheel_v[2] + wheel_v[3]);
-        base_v[1] = kWheel * (-wheel_v[0] + wheel_v[1] + wheel_v[2] - wheel_v[3]);
-        // 观测量：车体系速度，与 h(x) = R^T * v_ 同一坐标系
-        // z 分量设为 0 作为零速观测，抑制 z 方向漂移
-        Eigen::Vector3d y(base_v[0], base_v[1], 0.0);
-        /*
-            ^ y
-            o > x
-            小车速度分解方向
-        */
-        
-        // 观测值 h(x) = R^Tv 我们只观测两轴分速度
-        Eigen::Matrix3d R_T = 
-            q_.toRotationMatrix().transpose();
-        Eigen::Vector3d h_x = R_T * v_;
+        constexpr double kWz    = 0.0815 / (4.0 * 0.3005); // r/(4*(lx+ly))
 
-        // 雅可比矩阵H
-        Eigen::Matrix<double, 3, 15> H = 
-            Eigen::Matrix<double, 3, 15>::Zero();
+        // 观测量：车体系速度(vx, vy, vz=0) + 车体系角速度(wz)，共 4 维
+        Eigen::Vector4d y;
+        y(0) = kWheel * ( wheel_v[0] + wheel_v[1] + wheel_v[2] + wheel_v[3]);  // vx
+        y(1) = kWheel * (-wheel_v[0] + wheel_v[1] + wheel_v[2] - wheel_v[3]);  // vy
+        y(2) = 0.0;                                                               // vz=0 零速观测
+        y(3) = kWz   * (-wheel_v[0] + wheel_v[1] - wheel_v[2] + wheel_v[3]);    // wz
+
+        // 观测模型 h(x)：
+        //   速度部分（前 3 维）：h_v = R^T * v_，将世界系速度转到车体系
+        //   角速度部分（第 4 维）：h_w = R^T * [0,0,wz_imu]^T 的 z 分量
+        //     但我们直接用陀螺仪测量的 gyro_z 作为 h_w 的基线更好
+        //     这里用更直接的方式：h_w = (R^T * q_omega)_z = (R^T * R * w_body)_z = w_body_z
+        //     简化后 h_w = gyro_z - b_g_z（已补偿零偏的陀螺仪 z 轴输出）
+        Eigen::Matrix3d R = q_.toRotationMatrix();
+        Eigen::Matrix3d R_T = R.transpose();
+        Eigen::Vector3d v_body = R_T * v_;  // 世界系速度 → 车体系速度
+
+        // 观测预测值 h(x)
+        Eigen::Vector4d h_x;
+        h_x.head<3>() = v_body;
+        // 角速度观测：陀螺仪 z 轴测量值（已补偿零偏）在 predict 中已被积分进 q_，
+        // 这里用 ESKF 名义状态反推的车体 z 角速度作为 h 的第 4 维
+        // h_w = [0, 0, 1]^T · (R^T * (q_ * w_body)) 简化为 w_body_z
+        h_x(3) = msg->angular_velocity.z - b_g_.z();
+
+        // 雅可比矩阵 H (4×15)
+        Eigen::Matrix<double, 4, 15> H =
+            Eigen::Matrix<double, 4, 15>::Zero();
+
+        // 速度部分对 δv 的偏导：∂(R^T * v_)/∂δv = R^T
         H.block<3, 3>(0, 3) = R_T;
+
+        // 速度部分对 δθ 的偏导：∂(R^T * v_)/∂δθ = [R^T * v_]× = [v_body]×
         Eigen::Matrix3d v_anti;
-        v_anti <<        0, -h_x.z(),  h_x.y(),
-                   h_x.z(),        0, -h_x.x(),
-                  -h_x.y(),  h_x.x(),        0;
+        v_anti <<        0, -v_body.z(),  v_body.y(),
+                   v_body.z(),        0, -v_body.x(),
+                  -v_body.y(),  v_body.x(),        0;
         H.block<3, 3>(0, 6) = v_anti;
 
-        // 卡尔曼增益Kk
+        // 角速度部分对 δθ 的偏导：
+        // h_w = gyro_z - (b_g_z + δb_g_z)
+        // 当旋转有误差 δθ 时，R^T 会变化，但角速度观测是在车体系测量的，
+        // δθ 对车体系角速度观测的影响可以忽略（二阶小量）
+        // H(3, 6) ≈ 0
+
+        // 角速度部分对 δb_g 的偏导：∂(gyro_z - b_g_z - δb_g_z)/∂δb_g = [0, 0, -1]
+        H(3, 14) = -1.0;  // δb_g 的 z 分量在状态向量中的索引是 12+2=14
+
+        // 卡尔曼增益 Kk (15×4)
         auto S = H * P_ * H.transpose() + R_;
-        Eigen::Matrix<double, 15, 3> Kk = 
+        Eigen::Matrix<double, 15, 4> Kk =
             P_ * H.transpose() * S.inverse();
 
-        // 更新误差状态delta x
-        delta_x_ = Kk * (y - h_x);
+        // 更新误差状态 delta_x
+        delta_x_ += Kk * (y - h_x);
 
-        // 更新状态误差协方差矩阵
-        Eigen::Matrix<double, 15, 15> I = 
+        // 更新状态误差协方差矩阵（Joseph 形式）
+        Eigen::Matrix<double, 15, 15> I15 =
             Eigen::Matrix<double, 15, 15>::Identity();
-        P_ = (I - Kk * H) * P_ * 
-             (I - Kk * H).transpose() +
-             Kk * R_ * Kk.transpose(); // Joseph形式
+        P_ = (I15 - Kk * H) * P_ *
+             (I15 - Kk * H).transpose() +
+             Kk * R_ * Kk.transpose();
+    }
+
+    void NavDataHandle::observeZeroTilt()
+    {
+        // 地面机器人约束：pitch ≈ 0, roll ≈ 0
+        // 从当前四元数提取 pitch 和 roll 作为 "观测值"，
+        // 目标值是 0，通过 ESKF 观测更新将角度拉回水平面。
+        //
+        // R = R_z(yaw) * R_y(-pitch) * R_x(roll)
+        // 提取方法：
+        //   pitch = -asin(R(2,0))   （R 的第 3 行第 1 列）
+        //   roll  = atan2(R(2,1), R(2,2))
+
+        Eigen::Matrix3d R = q_.toRotationMatrix();
+        double pitch = -std::asin(std::clamp(R(2, 0), -1.0, 1.0));
+        double roll  =  std::atan2(R(2, 1), R(2, 2));
+
+        // 观测量：当前的 pitch 和 roll（目标为 0）
+        Eigen::Vector2d y(pitch, roll);
+        Eigen::Vector2d h_x = Eigen::Vector2d::Zero();  // 目标值：pitch=0, roll=0
+
+        // 雅可比矩阵 H (2×15)
+        // δpitch ≈ δθ_y（绕 y 轴的误差角），δroll ≈ δθ_x（绕 x 轴的误差角）
+        // 在 ESKF 误差状态中，δθ = [δθ_x, δθ_y, δθ_z]
+        // 所以 H 对 δθ 的偏导为：
+        //   ∂pitch/∂δθ = [0, -1, 0]  （pitch 对应 δθ_y，符号取负因为 pitch = -asin(R20)）
+        //   ∂roll/∂δθ  = [1, 0, 0]   （roll 对应 δθ_x）
+        Eigen::Matrix<double, 2, 15> H =
+            Eigen::Matrix<double, 2, 15>::Zero();
+        H(0, 6) =  0.0;  // ∂pitch/∂δθ_x
+        H(0, 7) = -1.0;  // ∂pitch/∂δθ_y
+        H(0, 8) =  0.0;  // ∂pitch/∂δθ_z
+        H(1, 6) =  1.0;  // ∂roll/∂δθ_x
+        H(1, 7) =  0.0;  // ∂roll/∂δθ_y
+        H(1, 8) =  0.0;  // ∂roll/∂δθ_z
+
+        // 卡尔曼增益 Kk (15×2)
+        auto S = H * P_ * H.transpose() + R_tilt_;
+        Eigen::Matrix<double, 15, 2> Kk =
+            P_ * H.transpose() * S.inverse();
+
+        // 更新误差状态
+        delta_x_ += Kk * (y - h_x);
+
+        // 更新协方差矩阵（Joseph 形式）
+        Eigen::Matrix<double, 15, 15> I15 =
+            Eigen::Matrix<double, 15, 15>::Identity();
+        P_ = (I15 - Kk * H) * P_ *
+             (I15 - Kk * H).transpose() +
+             Kk * R_tilt_ * Kk.transpose();
     }
 
     void NavDataHandle::injectAndReset() {
