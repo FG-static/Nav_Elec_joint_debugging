@@ -85,12 +85,16 @@ def generate_launch_description():
         parameters=[{'use_sim_time': use_sim_time}]
     )
 
+    # ESKF 配置文件
+    eskf_config_file = os.path.join(pkg_project_bringup, 'config', 'config.yaml')
+
     # 数据处理节点
     data_handle_node = Node(
         package='my_nav2_robot',
         executable='data_handle_node',
         name='data_handle_node',
-        output='screen'
+        output='screen',
+        parameters=[eskf_config_file]
     )
 
     # 启动节点

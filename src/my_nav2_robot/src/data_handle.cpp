@@ -28,12 +28,49 @@ namespace nav_data_handle {
         b_g_.setZero();
         q_.setIdentity();
         delta_x_.setZero();
-        P_ = Eigen::Matrix<double, 15, 15>::Identity() * 0.01;
-        Q_ = Eigen::Matrix<double, 15, 15>::Identity() * 0.005;
-        R_ = Eigen::Matrix4d::Identity() * 0.005;
-        R_tilt_ = Eigen::Matrix2d::Identity() * 0.005; // pitch/roll 零倾斜约束，适度信任
+
+        // 从配置文件加载 P、Q、R、R_tilt 参数
+        loadESKFParams();
 
         RCLCPP_INFO(this->get_logger(), "ESKF Data Handle Node Initialized");
+    }
+
+    void NavDataHandle::loadESKFParams()
+    {
+        // 声明
+        this->declare_parameter("eskf.P_init", 0.01);
+        this->declare_parameter("eskf.Q_init", 0.005);
+        this->declare_parameter("eskf.R_init", 0.005);
+        this->declare_parameter("eskf.R_tilt_init", 0.005);
+
+        // 读取
+        double P_init     = this->get_parameter("eskf.P_init").as_double();
+        double Q_init     = this->get_parameter("eskf.Q_init").as_double();
+        double R_init     = this->get_parameter("eskf.R_init").as_double();
+        double R_tilt_init = this->get_parameter("eskf.R_tilt_init").as_double();
+
+        // 参数有效性检查
+        if (P_init <= 0.0 || Q_init <= 0.0 || R_init <= 0.0 || R_tilt_init <= 0.0) {
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "ESKF 噪声参数必须为正数！收到 P=%.6f, Q=%.6f, R=%.6f, R_tilt=%.6f，"
+                "将使用默认值",
+                P_init, Q_init, R_init, R_tilt_init);
+            P_init     = 0.01;
+            Q_init     = 0.005;
+            R_init     = 0.005;
+            R_tilt_init = 0.005;
+        }
+
+        P_      = Eigen::Matrix<double, 15, 15>::Identity() * P_init;
+        Q_      = Eigen::Matrix<double, 15, 15>::Identity() * Q_init;
+        R_      = Eigen::Matrix4d::Identity() * R_init;
+        R_tilt_ = Eigen::Matrix2d::Identity() * R_tilt_init;
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "ESKF 参数已加载: P=%.6f, Q=%.6f, R=%.6f, R_tilt=%.6f",
+            P_init, Q_init, R_init, R_tilt_init);
     }
 
     void NavDataHandle::gimbalCallBack(

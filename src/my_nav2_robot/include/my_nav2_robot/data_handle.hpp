@@ -15,6 +15,8 @@
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
+#include <string>
+#include <fstream>
 
 namespace nav_data_handle {
 
@@ -24,6 +26,9 @@ namespace nav_data_handle {
 
         NavDataHandle();
     private:
+
+        // 从 ROS2 参数服务加载 ESKF 噪声参数
+        void loadESKFParams();
 
         int test; // 通信测试
 
