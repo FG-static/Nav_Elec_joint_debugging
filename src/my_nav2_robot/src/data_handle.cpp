@@ -42,12 +42,14 @@ namespace nav_data_handle {
         this->declare_parameter("eskf.Q_init", 0.005);
         this->declare_parameter("eskf.R_init", 0.005);
         this->declare_parameter("eskf.R_tilt_init", 0.005);
+        this->declare_parameter("eskf.calibration_duration", 1.5);
 
         // 读取
         double P_init     = this->get_parameter("eskf.P_init").as_double();
         double Q_init     = this->get_parameter("eskf.Q_init").as_double();
         double R_init     = this->get_parameter("eskf.R_init").as_double();
         double R_tilt_init = this->get_parameter("eskf.R_tilt_init").as_double();
+        calibration_duration_ = this->get_parameter("eskf.calibration_duration").as_double();
 
         // 参数有效性检查
         if (P_init <= 0.0 || Q_init <= 0.0 || R_init <= 0.0 || R_tilt_init <= 0.0) {
@@ -69,18 +71,69 @@ namespace nav_data_handle {
 
         RCLCPP_INFO(
             this->get_logger(),
-            "ESKF 参数已加载: P=%.6f, Q=%.6f, R=%.6f, R_tilt=%.6f",
-            P_init, Q_init, R_init, R_tilt_init);
+            "ESKF 参数已加载: P=%.6f, Q=%.6f, R=%.6f, R_tilt=%.6f, calibration=%.2fs",
+            P_init, Q_init, R_init, R_tilt_init, calibration_duration_);
     }
 
     void NavDataHandle::gimbalCallBack(
         const rm_interfaces::msg::Gimbal::SharedPtr msg
     ) {
 
+        // ========== 零偏标定阶段 ==========
+        if (calib_state_ == CalibState::CALIBRATING) {
+            
+            // 记录标定起始帧时间戳
+            if (calib_count_ == 0) {
+                calib_start_t_ms_ = msg->t_ms;
+            }
+
+            // 累积 IMU 原始数据
+            calib_acc_sum_ += Eigen::Vector3d(
+                msg->linear_acceleration.x,
+                msg->linear_acceleration.y,
+                msg->linear_acceleration.z
+            );
+            calib_gyro_sum_ += Eigen::Vector3d(
+                msg->angular_velocity.x,
+                msg->angular_velocity.y,
+                msg->angular_velocity.z
+            );
+            calib_count_++;
+
+            // 检查标定时长是否已到
+            double elapsed = static_cast<double>(msg->t_ms - calib_start_t_ms_) / 1000.0;
+            if (elapsed >= calibration_duration_ && calib_count_ > 0) {
+
+                // 计算均值
+                Eigen::Vector3d mean_acc  = calib_acc_sum_  / calib_count_;
+                Eigen::Vector3d mean_gyro = calib_gyro_sum_ / calib_count_;
+
+                // 零偏设定：
+                //   陀螺仪零偏 = 静止时陀螺仪输出的均值
+                //   加速度计零偏 = 静止时加速度计输出均值 - 重力反应力
+                //     静止时 acc_raw = b_a + R^T * (-g) = b_a + [0,0,+9.8]
+                //     所以 b_a = mean_acc - [0,0,9.8]
+                b_g_ = mean_gyro;
+                b_a_ = mean_acc - Eigen::Vector3d(0, 0, 9.8);
+
+                calib_state_ = CalibState::RUNNING;
+                last_t_ms_ = msg->t_ms; // 初始化 dt 起始帧
+
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "零偏标定完成（%d 帧，%.2fs）: b_a=[%.4f, %.4f, %.4f], b_g=[%.6f, %.6f, %.6f]",
+                    calib_count_, elapsed,
+                    b_a_.x(), b_a_.y(), b_a_.z(),
+                    b_g_.x(), b_g_.y(), b_g_.z());
+            }
+            return; // 标定期间不执行 ESKF
+        }
+
+        // ========== 正常运行阶段 ==========
         // 初始化：记录第一帧 t_ms，等下一帧才能算 dt
-        if (!initialized) {
+        if (last_t_ms_ == 0) {
+
             last_t_ms_ = msg->t_ms;
-            initialized = true;
             return;
         }
 

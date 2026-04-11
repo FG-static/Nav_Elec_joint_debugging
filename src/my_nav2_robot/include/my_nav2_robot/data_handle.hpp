@@ -69,8 +69,16 @@ namespace nav_data_handle {
         Eigen::Matrix4d R_; // 观测噪声 - observeWheel 观测量 vx, vy, vz, wz
         Eigen::Matrix2d R_tilt_; // 观测噪声 - observeZeroTilt 观测量 pitch, roll
 
+        // 零偏标定状态机
+        enum class CalibState { CALIBRATING, RUNNING };
+        CalibState calib_state_ = CalibState::CALIBRATING;
+        Eigen::Vector3d calib_acc_sum_  = Eigen::Vector3d::Zero();
+        Eigen::Vector3d calib_gyro_sum_ = Eigen::Vector3d::Zero();
+        int calib_count_ = 0;
+        uint32_t calib_start_t_ms_ = 0;
+        double calibration_duration_ = 1.5; // 标定时长（秒），从参数加载
+
         // help
-        bool initialized = false;
         uint32_t last_t_ms_ = 0; // MCU 上一帧采样时间戳（ms），用于计算 dt
         nav_msgs::msg::Path path_;
 
