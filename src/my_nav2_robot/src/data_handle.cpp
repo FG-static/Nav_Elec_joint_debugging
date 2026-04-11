@@ -109,10 +109,10 @@ namespace nav_data_handle {
                 Eigen::Vector3d mean_gyro = calib_gyro_sum_ / calib_count_;
 
                 // 零偏设定：
-                //   陀螺仪零偏 = 静止时陀螺仪输出的均值
-                //   加速度计零偏 = 静止时加速度计输出均值 - 重力反应力
-                //     静止时 acc_raw = b_a + R^T * (-g) = b_a + [0,0,+9.8]
-                //     所以 b_a = mean_acc - [0,0,9.8]
+                // 陀螺仪零偏 = 静止时陀螺仪输出的均值
+                // 加速度计零偏 = 静止时加速度计输出均值 - 重力反应力
+                // 静止时 acc_raw = b_a + R^T * (-g) = b_a + [0,0,+9.8]
+                // b_a = mean_acc - [0,0,9.8]
                 b_g_ = mean_gyro;
                 b_a_ = mean_acc + G_VEC_;
 
