@@ -81,7 +81,7 @@ namespace nav_data_handle {
 
         // ========== 零偏标定阶段 ==========
         if (calib_state_ == CalibState::CALIBRATING) {
-            
+
             // 记录标定起始帧时间戳
             if (calib_count_ == 0) {
                 calib_start_t_ms_ = msg->t_ms;
@@ -114,7 +114,7 @@ namespace nav_data_handle {
                 //     静止时 acc_raw = b_a + R^T * (-g) = b_a + [0,0,+9.8]
                 //     所以 b_a = mean_acc - [0,0,9.8]
                 b_g_ = mean_gyro;
-                b_a_ = mean_acc - Eigen::Vector3d(0, 0, 9.8);
+                b_a_ = mean_acc + G_VEC_;
 
                 calib_state_ = CalibState::RUNNING;
                 last_t_ms_ = msg->t_ms; // 初始化 dt 起始帧
