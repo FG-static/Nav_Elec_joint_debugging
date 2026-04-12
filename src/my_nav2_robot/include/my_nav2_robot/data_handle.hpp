@@ -49,6 +49,7 @@ namespace nav_data_handle {
         rclcpp::Publisher<rm_interfaces::msg::Target>::SharedPtr target_pub_;
         rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
         rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+        rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr acc_pub_;
         std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     
         // 名义状态
