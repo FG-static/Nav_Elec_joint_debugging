@@ -19,6 +19,9 @@ namespace nav_data_handle {
         odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>(
             "/odom", 10
         );
+        acc_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
+            "/acc", 10
+        );
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(* this);
 
         // 初始化ESKF变量
@@ -215,6 +218,13 @@ namespace nav_data_handle {
         Fx.block<3, 3>(6, 12) = -Eigen::Matrix3d::Identity() * dt;
 
         P_ = Fx * P_ * Fx.transpose() + Q_;
+
+        // 发布加速度
+        geometry_msgs::msg::Vector3 acc_msg;
+        acc_msg.x = acc.x();
+        acc_msg.y = acc.y();
+        acc_msg.z = acc.z();
+        acc_pub_->publish(acc_msg);
     }  
 
     void NavDataHandle::observeWheel(
