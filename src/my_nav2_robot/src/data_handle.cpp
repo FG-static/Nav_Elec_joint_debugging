@@ -46,13 +46,17 @@ namespace nav_data_handle {
         this->declare_parameter("eskf.R_init", 0.005);
         this->declare_parameter("eskf.R_tilt_init", 0.005);
         this->declare_parameter("eskf.calibration_duration", 1.5);
+        this->declare_parameter("eskf.alpha_lowpass",      0.05); // 加速度计+轮速，重滤波
+        this->declare_parameter("eskf.alpha_lowpass_gyro", 0.3);  // 陀螺仪，轻滤波
 
         // 读取
         double P_init     = this->get_parameter("eskf.P_init").as_double();
         double Q_init     = this->get_parameter("eskf.Q_init").as_double();
         double R_init     = this->get_parameter("eskf.R_init").as_double();
         double R_tilt_init = this->get_parameter("eskf.R_tilt_init").as_double();
-        calibration_duration_ = this->get_parameter("eskf.calibration_duration").as_double();
+        calibration_duration_  = this->get_parameter("eskf.calibration_duration").as_double();
+        alpha_lowpass_         = this->get_parameter("eskf.alpha_lowpass").as_double();
+        alpha_lowpass_gyro_    = this->get_parameter("eskf.alpha_lowpass_gyro").as_double();
 
         // 参数有效性检查
         if (P_init <= 0.0 || Q_init <= 0.0 || R_init <= 0.0 || R_tilt_init <= 0.0) {
@@ -122,6 +126,15 @@ namespace nav_data_handle {
                 calib_state_ = CalibState::RUNNING;
                 last_t_ms_ = msg->t_ms; // 初始化 dt 起始帧
 
+                // 用标定结束帧的原始值初始化低通滤波器（避免第一帧阶跃）
+                gyro_filtered_  = Eigen::Vector3d(
+                    msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z);
+                acc_filtered_   = Eigen::Vector3d(
+                    msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z);
+                wheel_filtered_ = Eigen::Vector4d(
+                    msg->wheel_velocity.x, msg->wheel_velocity.y,
+                    msg->wheel_velocity.z, msg->wheel_velocity.w);
+
                 RCLCPP_INFO(
                     this->get_logger(),
                     "零偏标定完成（%d 帧，%.2fs）: b_a=[%.4f, %.4f, %.4f], b_g=[%.6f, %.6f, %.6f]",
@@ -149,9 +162,30 @@ namespace nav_data_handle {
             return;
         }
 
-        // ESKF
-        predict(msg, dt);
-        observeWheel(msg);
+        // 低通滤波
+        // y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
+        // 陀螺仪：alpha 较大（响应快，避免角速度滞后影响航向估计）
+        // 加速度计 + 轮速：alpha 较小（平滑强，压制噪声和冲击）
+        gyro_filtered_ = alpha_lowpass_gyro_ * Eigen::Vector3d(
+                             msg->angular_velocity.x,
+                             msg->angular_velocity.y,
+                             msg->angular_velocity.z)
+                       + (1.0 - alpha_lowpass_gyro_) * gyro_filtered_;
+
+        acc_filtered_  = alpha_lowpass_ * Eigen::Vector3d(
+                             msg->linear_acceleration.x,
+                             msg->linear_acceleration.y,
+                             msg->linear_acceleration.z)
+                       + (1.0 - alpha_lowpass_) * acc_filtered_;
+
+        wheel_filtered_ = alpha_lowpass_ * Eigen::Vector4d(
+                              msg->wheel_velocity.x, msg->wheel_velocity.y,
+                              msg->wheel_velocity.z, msg->wheel_velocity.w)
+                        + (1.0 - alpha_lowpass_) * wheel_filtered_;
+
+        // ESKF（使用滤波后数据）
+        predict(dt);
+        observeWheel();
         observeZeroTilt();
         injectAndReset();
 
@@ -173,21 +207,11 @@ namespace nav_data_handle {
         return anti;
     }
 
-    void NavDataHandle::predict(const rm_interfaces::msg::Gimbal::SharedPtr msg, double dt) {
+    void NavDataHandle::predict(double dt) {
 
-        // 补偿零偏
-        Eigen::Vector3d acc_raw(
-            msg->linear_acceleration.x, 
-            msg->linear_acceleration.y,
-            msg->linear_acceleration.z
-        );
-        Eigen::Vector3d w_raw(
-            msg->angular_velocity.x,
-            msg->angular_velocity.y,
-            msg->angular_velocity.z
-        );
-        Eigen::Vector3d acc = acc_raw - b_a_;
-        Eigen::Vector3d w = w_raw - b_g_;
+        // 补偿零偏（使用低通滤波后的数据）
+        Eigen::Vector3d acc = acc_filtered_  - b_a_;
+        Eigen::Vector3d w   = gyro_filtered_ - b_g_;
 
         // Gimbal->Base 坐标系转换 - 自动处理四元数运算，无需乘两次
         // 可惜没有云台
@@ -227,17 +251,10 @@ namespace nav_data_handle {
         acc_pub_->publish(acc_msg);
     }  
 
-    void NavDataHandle::observeWheel(
-        const rm_interfaces::msg::Gimbal::SharedPtr msg
-    ) {
-
-        // 解算底盘速度
-        Eigen::Vector<double, 4> wheel_v(
-            msg->wheel_velocity.x,
-            msg->wheel_velocity.y,
-            msg->wheel_velocity.z,
-            msg->wheel_velocity.w
-        );
+    void NavDataHandle::observeWheel()
+    {
+        // 解算底盘速度（使用低通滤波后的轮速数据）
+        Eigen::Vector<double, 4> wheel_v = wheel_filtered_;
         // 麦轮运动学（来自 imu_coordinate.md）：
         //   vx = r/4 * ( w_fl + w_fr + w_rl + w_rr)
         //   vy = r/4 * (-w_fl + w_fr + w_rl - w_rr)
@@ -274,7 +291,7 @@ namespace nav_data_handle {
         // 角速度观测：陀螺仪 z 轴测量值（已补偿零偏）在 predict 中已被积分进 q_，
         // 这里用 ESKF 名义状态反推的车体 z 角速度作为 h 的第 4 维
         // h_w = [0, 0, 1]^T · (R^T * (q_ * w_body)) 简化为 w_body_z
-        h_x(3) = msg->angular_velocity.z - b_g_.z();
+        h_x(3) = gyro_filtered_.z() - b_g_.z();
 
         // 雅可比矩阵 H (4×15)
         Eigen::Matrix<double, 4, 15> H =

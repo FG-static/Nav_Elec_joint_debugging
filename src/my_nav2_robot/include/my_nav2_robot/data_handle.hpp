@@ -38,8 +38,8 @@ namespace nav_data_handle {
         void gimbalCallBack(const rm_interfaces::msg::Gimbal::SharedPtr msg);
 
         // ESKF
-        void predict(const rm_interfaces::msg::Gimbal::SharedPtr msg, double dt);
-        void observeWheel(const rm_interfaces::msg::Gimbal::SharedPtr msg);
+        void predict(double dt);
+        void observeWheel();
         void observeZeroTilt();
         void injectAndReset();
 
@@ -78,6 +78,17 @@ namespace nav_data_handle {
         int calib_count_ = 0;
         uint32_t calib_start_t_ms_ = 0;
         double calibration_duration_ = 1.5; // 标定时长（秒），从参数加载
+
+        // 低通滤波系数
+        // alpha ∈ (0,1)：越小滤波越重（时间常数越长），越大响应越快
+        // 加速度计：alpha 小（平滑强），陀螺仪：alpha 大（响应快）
+        double alpha_lowpass_      = 0.05;  // 加速度计 + 轮速（重滤波）
+        double alpha_lowpass_gyro_ = 0.3;   // 陀螺仪（轻滤波）
+
+        // 低通滤波器状态（标定结束时初始化，运行阶段每帧更新）
+        Eigen::Vector3d gyro_filtered_   = Eigen::Vector3d::Zero();
+        Eigen::Vector3d acc_filtered_    = Eigen::Vector3d::Zero();
+        Eigen::Vector4d wheel_filtered_  = Eigen::Vector4d::Zero();
 
         // help
         uint32_t last_t_ms_ = 0; // MCU 上一帧采样时间戳（ms），用于计算 dt
