@@ -123,11 +123,13 @@ namespace nav_data_handle {
 
                 // 零偏设定：
                 // 陀螺仪零偏 = 静止时陀螺仪输出的均值
-                // 加速度计零偏 = 静止时加速度计输出均值 - 重力反应力
-                // 静止时 acc_raw = b_a + R^T * (-g) = b_a + [0,0,+9.8]
-                // b_a = mean_acc - [0,0,9.8]
+                // 加速度计零偏 = 静止时原始帧测量均值 - 原始帧下重力反作用力
+                // 静止时 acc_raw = R_imu_to_body_^T * [0,0,+g] + b_a_raw
+                // b_a_raw = mean_acc - R_imu_to_body_^T * [0,0,+g]
+                //         = mean_acc + R_imu_to_body_^T * G_VEC_
+                // 注意：G_VEC_ 是体坐标系重力向量，需先旋转到原始 IMU 帧再与 mean_acc 相减
                 b_g_ = mean_gyro;
-                b_a_ = mean_acc + G_VEC_;
+                b_a_ = mean_acc + R_imu_to_body_.transpose() * G_VEC_;
 
                 calib_state_ = CalibState::RUNNING;
                 last_t_ms_ = msg->t_ms; // 初始化 dt 起始帧
@@ -247,9 +249,9 @@ namespace nav_data_handle {
         
         Fx.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity() * dt;
         Fx.block<3, 3>(3, 6) = -R * skew_symmetric(acc) * dt;
-        Fx.block<3, 3>(3, 9) = -R * dt; 
+        Fx.block<3, 3>(3, 9) = -R * R_imu_to_body_ * dt;  // b_a_ 在原始 IMU 帧：∂δv/∂δb_a = -R*R_imu
         Fx.block<3, 3>(6, 6) = Eigen::Matrix3d::Identity() - skew_symmetric(w * dt);
-        Fx.block<3, 3>(6, 12) = -Eigen::Matrix3d::Identity() * dt;
+        Fx.block<3, 3>(6, 12) = -R_imu_to_body_ * dt;     // b_g_ 在原始 IMU 帧：∂δθ/∂δb_g = -R_imu
 
         P_ = Fx * P_ * Fx.transpose() + Q_;
 
@@ -323,8 +325,11 @@ namespace nav_data_handle {
         // δθ 对车体系角速度观测的影响可以忽略（二阶小量）
         // H(3, 6) ≈ 0
 
-        // 角速度部分对 δb_g 的偏导：∂(gyro_z - b_g_z - δb_g_z)/∂δb_g = [0, 0, -1]
-        H(3, 14) = -1.0;  // δb_g 的 z 分量在状态向量中的索引是 12+2=14
+        // 角速度部分对 δb_g 的偏导：
+        // h_w = [R_imu_to_body_ * (gyro_filtered_ - b_g_)]_z
+        //      = R_imu_to_body_.row(2) * (gyro_filtered_ - b_g_)
+        // ∂h_w/∂δb_g = -R_imu_to_body_.row(2)（精确值，含 x/y 交叉项）
+        H.block<1, 3>(3, 12) = -R_imu_to_body_.row(2);
 
         // 卡尔曼增益 Kk (15×4)
         auto S = H * P_ * H.transpose() + R_;
