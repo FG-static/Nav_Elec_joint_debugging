@@ -188,19 +188,25 @@ $$\boldsymbol{\phi}_{k+1} = \boldsymbol{\phi}_k$$
 
 $$\Delta\boldsymbol{q} = \begin{bmatrix} \sin(\frac{\|\Delta\boldsymbol{\theta}\|}{2}) \frac{\Delta\boldsymbol{\theta}}{\|\Delta\boldsymbol{\theta}\|} \\ \cos(\frac{\|\Delta\boldsymbol{\theta}\|}{2}) \end{bmatrix}, \quad \Delta\boldsymbol{\theta} = \boldsymbol{\omega}_{clean}^{body} \Delta t$$
 
-> **代码实现参考**（17维版本）：
+> **当前代码实现**（`data_handle.cpp:210-232`，15维，φ=0 时 acc_body = acc_imu）：
 > ```cpp
-> // 补偿零偏
-> Eigen::Vector3d acc_imu = acc_raw - b_a_;
-> Eigen::Vector3d w_imu = w_raw - b_g_;
-> // 补偿姿态外参：IMU 系 → 车体系
+> Eigen::Vector3d acc = acc_filtered_ - b_a_;
+> Eigen::Vector3d w   = gyro_filtered_ - b_g_;
+> p_ = p_ + v_ * dt + 0.5 * (q_ * acc + G_VEC_) * dt * dt;
+> v_ = v_ + (q_ * acc + G_VEC_) * dt;
+> ```
+>
+> **扩展为 17 维后需修改**（新增姿态外参补偿）：
+> ```cpp
+> Eigen::Vector3d acc_imu = acc_filtered_ - b_a_;
+> Eigen::Vector3d w_imu   = gyro_filtered_ - b_g_;
 > Eigen::Matrix3d phi_cross = skew_symmetric(Eigen::Vector3d(phi_.x(), phi_.y(), 0.0));
 > Eigen::Vector3d acc_body = (Eigen::Matrix3d::Identity() - phi_cross) * acc_imu;
 > Eigen::Vector3d w_body   = (Eigen::Matrix3d::Identity() - phi_cross) * w_imu;
-> // 名义状态积分
 > p_ = p_ + v_ * dt + 0.5 * (q_ * acc_body + G_VEC_) * dt * dt;
 > v_ = v_ + (q_ * acc_body + G_VEC_) * dt;
 > ```
+> 当 φ=0 时，`phi_cross = 0`，`acc_body = acc_imu`，与当前代码完全一致。
 
 ### 3.3 误差状态传播方程
 
@@ -302,22 +308,20 @@ $\boldsymbol{\phi}$ 为常量，$\delta\dot{\boldsymbol{\phi}} = \boldsymbol{0}$
 
 $$\boldsymbol{\Phi} = \begin{bmatrix} \boldsymbol{I} & \boldsymbol{I}\Delta t & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} \\ \boldsymbol{0} & \boldsymbol{I} & -\boldsymbol{R}[\boldsymbol{a}_c^{body}]_\times\Delta t & -\boldsymbol{R}\Delta t & \boldsymbol{0} & \boldsymbol{F}_{\boldsymbol{v}\boldsymbol{\phi}}\Delta t \\ \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{I} - [\boldsymbol{\omega}_c^{body}]_\times\Delta t & \boldsymbol{0} & -\boldsymbol{I}\Delta t & \boldsymbol{F}_{\boldsymbol{\theta}\boldsymbol{\phi}}\Delta t \\ \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{I} & \boldsymbol{0} & \boldsymbol{0} \\ \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{I} & \boldsymbol{0} \\ \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{I} \end{bmatrix}$$
 
-> **代码实现参考**（17维版本）：
+> **当前代码实现**（`data_handle.cpp:234-244`，15维，φ=0 时 acc_body = acc）：
 > ```cpp
-> Eigen::Matrix<double, 17, 17> Fx = Eigen::Matrix<double, 17, 17>::Identity();
+> Eigen::Matrix<double, 15, 15> Fx = Eigen::Matrix<double, 15, 15>::Identity();
 > Eigen::Matrix3d R = q_.toRotationMatrix();
-> Eigen::Matrix3d phi_cross = skew_symmetric(Eigen::Vector3d(phi_.x(), phi_.y(), 0.0));
-> Eigen::Vector3d acc_imu = acc_raw - b_a_;
-> Eigen::Vector3d w_imu = w_raw - b_g_;
-> Eigen::Vector3d acc_body = (Eigen::Matrix3d::Identity() - phi_cross) * acc_imu;
-> Eigen::Vector3d w_body = (Eigen::Matrix3d::Identity() - phi_cross) * w_imu;
+> Fx.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity() * dt;
+> Fx.block<3, 3>(3, 6) = -R * skew_symmetric(acc) * dt;
+> Fx.block<3, 3>(3, 9) = -R * dt;
+> Fx.block<3, 3>(6, 6) = Eigen::Matrix3d::Identity() - skew_symmetric(w * dt);
+> Fx.block<3, 3>(6, 12) = -Eigen::Matrix3d::Identity() * dt;
+> ```
 >
-> Fx.block<3, 3>(0, 3)  = Eigen::Matrix3d::Identity() * dt;                     // ∂δp/∂δv
-> Fx.block<3, 3>(3, 6)  = -R * skew_symmetric(acc_body) * dt;                    // ∂δv/∂δθ
-> Fx.block<3, 3>(3, 9)  = -R * dt;                                               // ∂δv/∂δb_a
-> Fx.block<3, 3>(6, 6)  = Eigen::Matrix3d::Identity() - skew_symmetric(w_body) * dt; // ∂δθ/∂δθ
-> Fx.block<3, 3>(6, 12) = -Eigen::Matrix3d::Identity() * dt;                     // ∂δθ/∂δb_g
-> // ★新增：外参耦合项
+> **扩展为 17 维后需新增**（在上述 15 维代码基础上追加）：
+> ```cpp
+> // 维度扩展为 17×17，前 15×15 分块不变
 > Eigen::Matrix<double, 3, 2> F_v_phi, F_theta_phi;
 > F_v_phi << 0, -acc_imu.z(),
 >            acc_imu.z(), 0,
@@ -326,9 +330,10 @@ $$\boldsymbol{\Phi} = \begin{bmatrix} \boldsymbol{I} & \boldsymbol{I}\Delta t & 
 > F_theta_phi << 0,       -w_imu.z(),
 >                 w_imu.z(), 0,
 >                -w_imu.y(), w_imu.x();
-> Fx.block<3, 2>(3, 15)  = F_v_phi * dt;           // ∂δv/∂δφ
-> Fx.block<3, 2>(6, 15)  = F_theta_phi * dt;        // ∂δθ/∂δφ
+> Fx.block<3, 2>(3, 15) = F_v_phi * dt;        // ∂δv/∂δφ ★新增
+> Fx.block<3, 2>(6, 15) = F_theta_phi * dt;     // ∂δθ/∂δφ ★新增
 > ```
+> 当 φ=0 时，`acc_imu = acc`，`w_imu = w`，前 15×15 分块与当前代码完全一致。
 
 ### 3.5 协方差预测
 
@@ -522,18 +527,22 @@ $$\boldsymbol{\phi} \leftarrow \boldsymbol{\phi} + \delta\boldsymbol{\phi}$$
 
 $$\Delta\boldsymbol{q}(\delta\boldsymbol{\theta}) = \begin{bmatrix} \sin(\frac{\|\delta\boldsymbol{\theta}\|}{2})\frac{\delta\boldsymbol{\theta}}{\|\delta\boldsymbol{\theta}\|} \\ \cos(\frac{\|\delta\boldsymbol{\theta}\|}{2}) \end{bmatrix}$$
 
-> **代码实现参考**（17维版本）：
+> **当前代码实现**（`data_handle.cpp:386-402`，15维）：
 > ```cpp
 > p_ += delta_x_.segment<3>(0);
 > v_ += delta_x_.segment<3>(3);
 > b_a_ += delta_x_.segment<3>(9);
 > b_g_ += delta_x_.segment<3>(12);
-> phi_ += delta_x_.segment<2>(15);  // ★新增
 > Eigen::Vector3d dtheta = delta_x_.segment<3>(6);
 > if (dtheta.norm() > 1e-10) {
 >     Eigen::Quaterniond dq(Eigen::AngleAxisd(dtheta.norm(), dtheta.normalized()));
 >     q_ = (q_ * dq).normalized();
 > }
+> ```
+>
+> **扩展为 17 维后需新增**（在上述代码之后追加）：
+> ```cpp
+> phi_ += delta_x_.segment<2>(15);  // ★新增
 > ```
 
 ### 6.2 误差重置
