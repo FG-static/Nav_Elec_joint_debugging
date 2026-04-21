@@ -29,6 +29,7 @@ namespace nav_data_handle {
         v_.setZero();
         b_a_.setZero();
         b_g_.setZero();
+        phi_.setZero();
         q_.setIdentity();
         delta_x_.setZero();
 
@@ -71,10 +72,14 @@ namespace nav_data_handle {
             R_tilt_init = 0.005;
         }
 
-        P_      = Eigen::Matrix<double, 15, 15>::Identity() * P_init;
-        Q_      = Eigen::Matrix<double, 15, 15>::Identity() * Q_init;
+        P_      = Eigen::Matrix<double, 17, 17>::Identity() * P_init;
+        Q_      = Eigen::Matrix<double, 17, 17>::Identity() * Q_init;
         R_      = Eigen::Matrix4d::Identity() * R_init;
         R_tilt_ = Eigen::Matrix2d::Identity() * R_tilt_init;
+
+        // 外参相关参数：初始安装角不确定性较小，过程噪声极小（安装角为常量）
+        P_.block<2, 2>(15, 15) = Eigen::Matrix2d::Identity() * 0.001;
+        Q_.block<2, 2>(15, 15) = Eigen::Matrix2d::Identity() * 1e-8;
 
         RCLCPP_INFO(
             this->get_logger(),
@@ -209,9 +214,16 @@ namespace nav_data_handle {
 
     void NavDataHandle::predict(double dt) {
 
-        // 补偿零偏（使用低通滤波后的数据）
-        Eigen::Vector3d acc = acc_filtered_  - b_a_;
-        Eigen::Vector3d w   = gyro_filtered_ - b_g_;
+        // 补偿零偏（使用低通滤波后的数据），得到 IMU 系下的干净测量
+        Eigen::Vector3d acc_imu = acc_filtered_  - b_a_;
+        Eigen::Vector3d w_imu   = gyro_filtered_ - b_g_;
+
+        // 补偿 IMU 姿态安装误差：IMU 系 → 车体系
+        // a_body = (I - [φ3D]×) * a_imu, φ3D = [φx, φy, 0]^T
+        Eigen::Vector3d phi_3d(phi_.x(), phi_.y(), 0.0);
+        Eigen::Matrix3d phi_cross = skew_symmetric(phi_3d);
+        Eigen::Vector3d acc = (Eigen::Matrix3d::Identity() - phi_cross) * acc_imu;
+        Eigen::Vector3d w   = (Eigen::Matrix3d::Identity() - phi_cross) * w_imu;
 
         // Gimbal->Base 坐标系转换 - 自动处理四元数运算，无需乘两次
         // 可惜没有云台
@@ -232,14 +244,33 @@ namespace nav_data_handle {
         }
 
         // 协方差矩阵更新
-        Eigen::Matrix<double, 15, 15> Fx = Eigen::Matrix<double, 15, 15>::Identity();
+        Eigen::Matrix<double, 17, 17> Fx = Eigen::Matrix<double, 17, 17>::Identity();
         Eigen::Matrix3d R = q_.toRotationMatrix();
         
+        // 原 15×15 分块（与之前代码一致）
         Fx.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity() * dt;
         Fx.block<3, 3>(3, 6) = -R * skew_symmetric(acc) * dt;
         Fx.block<3, 3>(3, 9) = -R * dt; 
         Fx.block<3, 3>(6, 6) = Eigen::Matrix3d::Identity() - skew_symmetric(w * dt);
         Fx.block<3, 3>(6, 12) = -Eigen::Matrix3d::Identity() * dt;
+
+        // ★新增：外参耦合项
+        // F_{v,φ} = R * [[0, -a_z^imu], [a_z^imu, 0], [-a_y^imu, a_x^imu]]^T
+        // 重力泄漏耦合：安装角误差 → 加速度投影偏移 → 世界系速度误差
+        Eigen::Matrix<double, 3, 2> F_v_phi;
+        F_v_phi << 0,          -acc_imu.z(),
+                   acc_imu.z(),  0,
+                  -acc_imu.y(),  acc_imu.x();
+        F_v_phi = R * F_v_phi;
+        Fx.block<3, 2>(3, 15) = F_v_phi * dt;
+
+        // F_{θ,φ} = [[0, -ω_z^imu], [ω_z^imu, 0], [-ω_y^imu, ω_x^imu]]^T
+        // 角速度耦合：安装角误差 → 角速度投影偏移 → 姿态误差
+        Eigen::Matrix<double, 3, 2> F_theta_phi;
+        F_theta_phi << 0,         -w_imu.z(),
+                       w_imu.z(),  0,
+                      -w_imu.y(),  w_imu.x();
+        Fx.block<3, 2>(6, 15) = F_theta_phi * dt;
 
         P_ = Fx * P_ * Fx.transpose() + Q_;
 
@@ -293,9 +324,9 @@ namespace nav_data_handle {
         // h_w = [0, 0, 1]^T · (R^T * (q_ * w_body)) 简化为 w_body_z
         h_x(3) = gyro_filtered_.z() - b_g_.z();
 
-        // 雅可比矩阵 H (4×15)
-        Eigen::Matrix<double, 4, 15> H =
-            Eigen::Matrix<double, 4, 15>::Zero();
+        // 雅可比矩阵 H (4×17)
+        Eigen::Matrix<double, 4, 17> H =
+            Eigen::Matrix<double, 4, 17>::Zero();
 
         // 速度部分对 δv 的偏导：∂(R^T * v_)/∂δv = R^T
         H.block<3, 3>(0, 3) = R_T;
@@ -316,19 +347,19 @@ namespace nav_data_handle {
         // 角速度部分对 δb_g 的偏导：∂(gyro_z - b_g_z - δb_g_z)/∂δb_g = [0, 0, -1]
         H(3, 14) = -1.0;  // δb_g 的 z 分量在状态向量中的索引是 12+2=14
 
-        // 卡尔曼增益 Kk (15×4)
+        // 卡尔曼增益 Kk (17×4)
         auto S = H * P_ * H.transpose() + R_;
-        Eigen::Matrix<double, 15, 4> Kk =
+        Eigen::Matrix<double, 17, 4> Kk =
             P_ * H.transpose() * S.inverse();
 
         // 更新误差状态 delta_x
         delta_x_ += Kk * (y - h_x);
 
         // 更新状态误差协方差矩阵（Joseph 形式）
-        Eigen::Matrix<double, 15, 15> I15 =
-            Eigen::Matrix<double, 15, 15>::Identity();
-        P_ = (I15 - Kk * H) * P_ *
-             (I15 - Kk * H).transpose() +
+        Eigen::Matrix<double, 17, 17> I17 =
+            Eigen::Matrix<double, 17, 17>::Identity();
+        P_ = (I17 - Kk * H) * P_ *
+             (I17 - Kk * H).transpose() +
              Kk * R_ * Kk.transpose();
     }
 
@@ -352,14 +383,14 @@ namespace nav_data_handle {
         Eigen::Vector2d y = Eigen::Vector2d::Zero();   // 约束：地面水平，pitch=0, roll=0
         Eigen::Vector2d h_x(pitch, roll);               // 名义状态当前的 pitch/roll
 
-        // 雅可比矩阵 H (2×15)
+        // 雅可比矩阵 H (2×17)
         // body frame 右乘扰动：q_true = q_nominal * δq, R_true = R * (I + [δθ]×)
         // 对 level 机器人（pitch≈0, roll≈0）：
         //   R_true(2,0) = R(2,0) - R(2,2)*δθ_y → pitch ≈ δθ_y
         //   R_true(2,1) = R(2,1) + R(2,2)*δθ_x → roll ≈ δθ_x
         // 关键：body frame 扰动下 Jacobian 不依赖 yaw
-        Eigen::Matrix<double, 2, 15> H =
-            Eigen::Matrix<double, 2, 15>::Zero();
+        Eigen::Matrix<double, 2, 17> H =
+            Eigen::Matrix<double, 2, 17>::Zero();
         H(0, 6) =  0.0;  // ∂pitch/∂δθ_x
         H(0, 7) =  1.0;  // ∂pitch/∂δθ_y （R(2,2)/cos(pitch) ≈ +1）
         H(0, 8) =  0.0;  // ∂pitch/∂δθ_z
@@ -367,19 +398,19 @@ namespace nav_data_handle {
         H(1, 7) =  0.0;  // ∂roll/∂δθ_y
         H(1, 8) =  0.0;  // ∂roll/∂δθ_z
 
-        // 卡尔曼增益 Kk (15×2)
+        // 卡尔曼增益 Kk (17×2)
         auto S = H * P_ * H.transpose() + R_tilt_;
-        Eigen::Matrix<double, 15, 2> Kk =
+        Eigen::Matrix<double, 17, 2> Kk =
             P_ * H.transpose() * S.inverse();
 
         // 更新误差状态
         delta_x_ += Kk * (y - h_x);
 
         // 更新协方差矩阵（Joseph 形式）
-        Eigen::Matrix<double, 15, 15> I15 =
-            Eigen::Matrix<double, 15, 15>::Identity();
-        P_ = (I15 - Kk * H) * P_ *
-             (I15 - Kk * H).transpose() +
+        Eigen::Matrix<double, 17, 17> I17 =
+            Eigen::Matrix<double, 17, 17>::Identity();
+        P_ = (I17 - Kk * H) * P_ *
+             (I17 - Kk * H).transpose() +
              Kk * R_tilt_ * Kk.transpose();
     }
 
@@ -390,6 +421,7 @@ namespace nav_data_handle {
         v_ += delta_x_.segment<3>(3);
         b_a_ += delta_x_.segment<3>(9);
         b_g_ += delta_x_.segment<3>(12);
+        phi_ += delta_x_.segment<2>(15);  // IMU 姿态安装误差注入
         Eigen::Vector3d dtheta = delta_x_.segment<3>(6);
         if (dtheta.norm() > 1e-10) {
 

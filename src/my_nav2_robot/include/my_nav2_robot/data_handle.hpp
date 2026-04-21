@@ -58,15 +58,16 @@ namespace nav_data_handle {
         Eigen::Quaterniond q_; // quaternione : Base->World 也可以表示小车角度
         Eigen::Vector3d b_a_; // 加速计零偏
         Eigen::Vector3d b_g_; // 陀螺仪零偏
+        Eigen::Vector2d phi_; // IMU 姿态安装误差 [phi_x(Roll), phi_y(Pitch)]（车体系）
 
         // 误差状态
-        Eigen::Matrix<double, 15, 1> delta_x_; // 状态误差
+        Eigen::Matrix<double, 17, 1> delta_x_; // 状态误差
 
         // 状态误差协方差矩阵
-        Eigen::Matrix<double, 15, 15> P_;
+        Eigen::Matrix<double, 17, 17> P_;
 
         // 噪声矩阵
-        Eigen::Matrix<double, 15, 15> Q_; // 过程噪声
+        Eigen::Matrix<double, 17, 17> Q_; // 过程噪声
         Eigen::Matrix4d R_; // 观测噪声 - observeWheel 观测量 vx, vy, vz, wz
         Eigen::Matrix2d R_tilt_; // 观测噪声 - observeZeroTilt 观测量 pitch, roll
 
