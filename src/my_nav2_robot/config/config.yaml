@@ -23,5 +23,5 @@ data_handle_node:
 
     # 低通滤波平滑系数  y[n] = alpha * x[n] + (1-alpha) * y[n-1]
     # 值越小 -> 滤波越强，越平滑，滞后越大；值越大 -> 越贴近原始数据
-    eskf.alpha_lowpass: 0.05        # 加速度计 + 轮速（重滤波，压制噪声）
+    eskf.alpha_lowpass: 0.3        # 加速度计 + 轮速（重滤波，压制噪声）
     eskf.alpha_lowpass_gyro: 0.3    # 陀螺仪（轻滤波，保留动态响应）
