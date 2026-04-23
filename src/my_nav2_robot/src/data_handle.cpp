@@ -19,8 +19,8 @@ namespace nav_data_handle {
         odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>(
             "/odom", 10
         );
-        acc_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
-            "/acc", 10
+        wz_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
+            "/wz", 10
         );
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(* this);
 
@@ -80,6 +80,8 @@ namespace nav_data_handle {
         P_      = Eigen::Matrix<double, 15, 15>::Identity() * P_init;
         Q_      = Eigen::Matrix<double, 15, 15>::Identity() * Q_init;
         R_      = Eigen::Matrix4d::Identity() * R_init;
+        // 临时将R_对角线上第四个元素设为100
+        //R_(3, 3) = 100.0;
         R_tilt_ = Eigen::Matrix2d::Identity() * R_tilt_init;
 
         RCLCPP_INFO(
@@ -254,13 +256,6 @@ namespace nav_data_handle {
         Fx.block<3, 3>(6, 12) = -R_imu_to_body_ * dt;     // b_g_ 在原始 IMU 帧：∂δθ/∂δb_g = -R_imu
 
         P_ = Fx * P_ * Fx.transpose() + Q_;
-
-        // 发布加速度
-        geometry_msgs::msg::Vector3 acc_msg;
-        acc_msg.x = acc.x();
-        acc_msg.y = acc.y();
-        acc_msg.z = acc.z();
-        acc_pub_->publish(acc_msg);
     }  
 
     void NavDataHandle::observeWheel()
@@ -345,6 +340,15 @@ namespace nav_data_handle {
         P_ = (I15 - Kk * H) * P_ *
              (I15 - Kk * H).transpose() +
              Kk * R_ * Kk.transpose();
+
+        // 发布wz
+        Eigen::Vector3d w_imu   = gyro_filtered_ - b_g_;
+        geometry_msgs::msg::Vector3 wz_msg;
+        Eigen::Vector3d w = R_imu_to_body_ * w_imu;
+        wz_msg.x = y(3);
+        wz_msg.y = w(2);
+        wz_msg.z = 0.0;
+        wz_pub_->publish(wz_msg);
     }
 
     void NavDataHandle::observeZeroTilt()
@@ -455,7 +459,7 @@ namespace nav_data_handle {
         
         path_.header.frame_id = "odom"; // frame_id 必须设置，否则 RViz 不显示且 Nav2 报警
         path_.header.stamp = stamp;
-        if (path_.poses.size() > 5000) path_.poses.clear();
+        //if (path_.poses.size() > 5000) path_.poses.clear();
         path_.poses.push_back(ps);
 
         path_pub_->publish(path_);
