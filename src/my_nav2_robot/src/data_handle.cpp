@@ -22,6 +22,18 @@ namespace nav_data_handle {
         wz_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
             "/wz", 10
         );
+        odom_raw_pub_ = this->create_publisher<nav_msgs::msg::Odometry>(
+            "/odom_raw", 10
+        );
+        path_raw_pub_ = this->create_publisher<nav_msgs::msg::Path>(
+            "/path_raw", 10
+        );
+        odom_raw_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+            "/odom_raw", 10,
+            [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
+                odomRawCallback(msg);
+            }
+        );
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(* this);
 
         // 初始化ESKF变量
@@ -31,6 +43,11 @@ namespace nav_data_handle {
         b_g_.setZero();
         q_.setIdentity();
         delta_x_.setZero();
+
+        // 初始化原始位姿变量
+        p_raw_.setZero();
+        v_raw_.setZero();
+        q_raw_.setIdentity();
 
         // IMU 外参标定矩阵（IMU 系 → 车体系）
         // 通过离线标定获得，消除 IMU 安装角误差
@@ -52,8 +69,8 @@ namespace nav_data_handle {
         this->declare_parameter("eskf.R_init", 0.005);
         this->declare_parameter("eskf.R_tilt_init", 0.005);
         this->declare_parameter("eskf.calibration_duration", 1.5);
-        this->declare_parameter("eskf.alpha_lowpass",      0.05); // 加速度计+轮速，重滤波
-        this->declare_parameter("eskf.alpha_lowpass_gyro", 0.3);  // 陀螺仪，轻滤波
+        this->declare_parameter("eskf.alpha_lowpass",      0.3); // 加速度计+轮速，重滤波
+        this->declare_parameter("eskf.alpha_lowpass_gyro", 0.05);  // 陀螺仪，轻滤波
 
         // 读取
         double P_init     = this->get_parameter("eskf.P_init").as_double();
@@ -176,6 +193,20 @@ namespace nav_data_handle {
         // y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
         // 陀螺仪：alpha 较大（响应快，避免角速度滞后影响航向估计）
         // 加速度计 + 轮速：alpha 较小（平滑强，压制噪声和冲击）
+
+        // 缓存原始未滤波数据（供 publishRawOdometry 使用）
+        acc_raw_   = Eigen::Vector3d(
+                         msg->linear_acceleration.x,
+                         msg->linear_acceleration.y,
+                         msg->linear_acceleration.z);
+        gyro_raw_  = Eigen::Vector3d(
+                         msg->angular_velocity.x,
+                         msg->angular_velocity.y,
+                         msg->angular_velocity.z);
+        wheel_raw_ = Eigen::Vector4d(
+                         msg->wheel_velocity.x, msg->wheel_velocity.y,
+                         msg->wheel_velocity.z, msg->wheel_velocity.w);
+
         gyro_filtered_ = alpha_lowpass_gyro_ * Eigen::Vector3d(
                              msg->angular_velocity.x,
                              msg->angular_velocity.y,
@@ -201,6 +232,7 @@ namespace nav_data_handle {
 
         // visualizer（用 ROS 系统时间戳，保持 TF/Nav2 兼容性）
         publishOdometry(msg->header.stamp);
+        publishRawOdometry(msg->header.stamp);
 
         // update
         last_t_ms_ = msg->t_ms;
@@ -262,18 +294,18 @@ namespace nav_data_handle {
     {
         // 解算底盘速度（使用低通滤波后的轮速数据）
         Eigen::Vector<double, 4> wheel_v = wheel_filtered_;
-        // 麦轮运动学（来自 imu_coordinate.md）：
-        //   vx = r/4 * ( w_fl + w_fr + w_rl + w_rr)
-        //   vy = r/4 * (-w_fl + w_fr + w_rl - w_rr)
-        //   wz = r/(4*(lx+ly)) * (-w_fl + w_fr - w_rl + w_rr)
+        // 全向轮运动学（正交布局，辊子与底盘xy轴呈45°）：
+        //   vx = r/(4*cos45°) * ( w_fl + w_fr + w_rl + w_rr)
+        //   vy = r/(4*cos45°) * (-w_fl + w_fr + w_rl - w_rr)
+        //   wz = r/(4*L)      * (-w_fl + w_fr - w_rl + w_rr)
         // wheel_velocity 字段映射：x=fl, y=fr, z=rl, w=rr
         //
         // 实车机械参数：
         //   轮半径 r = 81.5mm = 0.0815m
-        //   轮对角线距离 = 425mm → 正方形布局假设 lx=ly=425/(2√2)≈150.3mm
-        //   lx + ly ≈ 300.5mm = 0.3005m（需与电控确认布局是否为正方形）
-        constexpr double kWheel = 0.0815 / 4.0;            // r/4
-        constexpr double kWz    = 0.0815 / (4.0 * 0.3005); // r/(4*(lx+ly))
+        //   全向轮正交布局：辊子与底盘径向轴呈45°，投影系数 cos45°
+        //   L = 0.2125m（轮心到车体中心距离在旋转方向的投影）
+        constexpr double kWheel = 0.0815 / (4.0 * 0.7071067811865476); // r/(4*cos45°)，全向轮正交布局
+        constexpr double kWz    = 0.0815 / (4.0 * 0.2125);             // r/(4*L)，L=0.2125m
 
         // 观测量：车体系速度(vx, vy, vz=0) + 车体系角速度(wz)，共 4 维
         Eigen::Vector4d y;
@@ -463,6 +495,70 @@ namespace nav_data_handle {
         path_.poses.push_back(ps);
 
         path_pub_->publish(path_);
+    }
+
+    void NavDataHandle::publishRawOdometry(const rclcpp::Time &stamp) {
+
+        // 使用原始未滤波数据做简单积分（仅补偿零偏，无ESKF校正）
+        // 零偏在标定完成后才有意义，标定期间不发布
+        if (calib_state_ != CalibState::RUNNING) return;
+
+        double dt = static_cast<double>(last_t_ms_ - last_t_ms_raw_) / 1000.0;
+        if (last_t_ms_raw_ == 0 || dt <= 0.0 || dt > 0.1) {
+            last_t_ms_raw_ = last_t_ms_;
+            return;
+        }
+
+        // 原始数据（未低通滤波）：使用 gimbalCallBack 中的 msg 原始值
+        // 此处直接使用上一次回调中保存的原始 IMU 测量
+        // 注意：acc_raw_ / gyro_raw_ / wheel_raw_ 在 gimbalCallBack 中赋值
+        Eigen::Vector3d acc_imu_raw = acc_raw_ - b_a_;
+        Eigen::Vector3d w_imu_raw   = gyro_raw_ - b_g_;
+
+        // IMU系 → 车体系
+        Eigen::Vector3d acc_raw = R_imu_to_body_ * acc_imu_raw;
+        Eigen::Vector3d w_raw   = R_imu_to_body_ * w_imu_raw;
+
+        // 简单前向欧拉积分
+        p_raw_ = p_raw_ + v_raw_ * dt + 0.5 * (q_raw_ * acc_raw + G_VEC_) * dt * dt;
+        v_raw_ = v_raw_ + (q_raw_ * acc_raw + G_VEC_) * dt;
+        Eigen::Vector3d dtheta_raw = w_raw * dt;
+        if (dtheta_raw.norm() > 1e-10) {
+            q_raw_ = q_raw_ * Eigen::Quaterniond(
+                Eigen::AngleAxisd(dtheta_raw.norm(), dtheta_raw.normalized()));
+        }
+
+        // 发布原始里程计
+        nav_msgs::msg::Odometry odom_raw;
+        odom_raw.header.stamp = stamp;
+        odom_raw.header.frame_id = "odom";
+        odom_raw.child_frame_id = "base_footprint";
+
+        odom_raw.pose.pose.position.x = p_.x();
+        odom_raw.pose.pose.position.y = p_.y();
+        odom_raw.pose.pose.position.z = p_.z();
+        odom_raw.pose.pose.orientation.x = q_raw_.x();
+        odom_raw.pose.pose.orientation.y = q_raw_.y();
+        odom_raw.pose.pose.orientation.z = q_raw_.z();
+        odom_raw.pose.pose.orientation.w = q_raw_.w();
+
+        odom_raw_pub_->publish(odom_raw);
+        last_t_ms_raw_ = last_t_ms_;
+    }
+
+    void NavDataHandle::odomRawCallback(
+        const nav_msgs::msg::Odometry::SharedPtr msg
+    ) {
+        // 订阅 /odom_raw，实时同步发布小车运动轨迹到 /path_raw
+        geometry_msgs::msg::PoseStamped ps;
+        ps.header = msg->header;
+        ps.pose = msg->pose.pose;
+
+        path_raw_.header.frame_id = msg->header.frame_id;
+        path_raw_.header.stamp = msg->header.stamp;
+        path_raw_.poses.push_back(ps);
+
+        path_raw_pub_->publish(path_raw_);
     }
 } // nav_data_handle
 

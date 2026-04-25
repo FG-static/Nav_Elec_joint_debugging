@@ -45,11 +45,16 @@ namespace nav_data_handle {
 
         // 接收 发布
         void publishOdometry(const rclcpp::Time &stamp);
+        void publishRawOdometry(const rclcpp::Time &stamp);
+        void odomRawCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
         rclcpp::Subscription<rm_interfaces::msg::Gimbal>::SharedPtr gimbal_sub_;
+        rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_raw_sub_;
         rclcpp::Publisher<rm_interfaces::msg::Target>::SharedPtr target_pub_;
         rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
         rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr wz_pub_;
+        rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_raw_pub_;
+        rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_raw_pub_;
         std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     
         // 名义状态
@@ -92,6 +97,18 @@ namespace nav_data_handle {
         Eigen::Vector3d gyro_filtered_   = Eigen::Vector3d::Zero();
         Eigen::Vector3d acc_filtered_    = Eigen::Vector3d::Zero();
         Eigen::Vector4d wheel_filtered_  = Eigen::Vector4d::Zero();
+
+        // 原始未滤波数据缓存（每帧 gimbalCallBack 中赋值，供 publishRawOdometry 使用）
+        Eigen::Vector3d acc_raw_   = Eigen::Vector3d::Zero();
+        Eigen::Vector3d gyro_raw_  = Eigen::Vector3d::Zero();
+        Eigen::Vector4d wheel_raw_ = Eigen::Vector4d::Zero();
+
+        // 原始未滤波位姿状态（简单积分，无ESKF校正）
+        Eigen::Vector3d p_raw_;
+        Eigen::Vector3d v_raw_;
+        Eigen::Quaterniond q_raw_;
+        uint32_t last_t_ms_raw_ = 0;
+        nav_msgs::msg::Path path_raw_;
 
         // help
         uint32_t last_t_ms_ = 0; // MCU 上一帧采样时间戳（ms），用于计算 dt
