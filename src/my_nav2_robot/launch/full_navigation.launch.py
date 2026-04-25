@@ -35,6 +35,7 @@ def generate_launch_description():
 
     # 部分变量定义
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
+    use_rviz = LaunchConfiguration('use_rviz', default='false')
 
     # map -> odom
     static_tf_node = Node(
@@ -82,7 +83,8 @@ def generate_launch_description():
         name='rviz2',
         output='screen',
         arguments=['-d', rviz_config_file],
-        parameters=[{'use_sim_time': use_sim_time}]
+        parameters=[{'use_sim_time': use_sim_time}],
+        condition=IfCondition(use_rviz),
     )
 
     # ESKF 配置文件
