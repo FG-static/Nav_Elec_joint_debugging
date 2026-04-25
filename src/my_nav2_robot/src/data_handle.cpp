@@ -34,6 +34,12 @@ namespace nav_data_handle {
                 odomRawCallback(msg);
             }
         );
+        bias_acc_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
+            "/bias_acc", 10
+        );
+        bias_gyro_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
+            "/bias_gyro", 10
+        );
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(* this);
 
         // 初始化ESKF变量
@@ -450,6 +456,13 @@ namespace nav_data_handle {
 
         // 重置
         delta_x_.setZero();
+
+        // 实时发布零偏数据
+        geometry_msgs::msg::Vector3 ba_msg, bg_msg;
+        ba_msg.x = b_a_.x(); ba_msg.y = b_a_.y(); ba_msg.z = b_a_.z();
+        bg_msg.x = b_g_.x(); bg_msg.y = b_g_.y(); bg_msg.z = b_g_.z();
+        bias_acc_pub_->publish(ba_msg);
+        bias_gyro_pub_->publish(bg_msg);
     }
 
     void NavDataHandle::publishOdometry(const rclcpp::Time &stamp) {

@@ -84,7 +84,7 @@ def generate_launch_description():
         output='screen',
         arguments=['-d', rviz_config_file],
         parameters=[{'use_sim_time': use_sim_time}],
-        condition=IfCondition(use_rviz),
+        #condition=IfCondition(use_rviz),
     )
 
     # ESKF 配置文件
@@ -107,7 +107,7 @@ def generate_launch_description():
         ),
         static_tf_node,
         nav2_launch,
-        rviz_node,
+        #rviz_node,
         node_robot_state_publisher,
         joint_state_publisher_node,
         data_handle_node

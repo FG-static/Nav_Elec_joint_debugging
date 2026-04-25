@@ -55,6 +55,8 @@ namespace nav_data_handle {
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr wz_pub_;
         rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_raw_pub_;
         rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_raw_pub_;
+        rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr bias_acc_pub_;
+        rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr bias_gyro_pub_;
         std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     
         // 名义状态
