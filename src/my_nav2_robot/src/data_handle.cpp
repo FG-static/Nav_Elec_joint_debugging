@@ -72,8 +72,12 @@ namespace nav_data_handle {
         // 声明
         this->declare_parameter("eskf.P_init", 0.01);
         this->declare_parameter("eskf.Q_init", 0.005);
-        this->declare_parameter("eskf.R_init", 0.005);
-        this->declare_parameter("eskf.R_tilt_init", 0.005);
+        this->declare_parameter("eskf.r_11", 0.005);
+        this->declare_parameter("eskf.r_22", 0.005);
+        this->declare_parameter("eskf.r_33", 0.005);
+        this->declare_parameter("eskf.r_44", 0.005);
+        this->declare_parameter("eskf.r_tilt_11", 0.005);
+        this->declare_parameter("eskf.r_tilt_22", 0.005);
         this->declare_parameter("eskf.calibration_duration", 1.5);
         this->declare_parameter("eskf.alpha_lowpass",      0.3); // 加速度计+轮速，重滤波
         this->declare_parameter("eskf.alpha_lowpass_gyro", 0.05);  // 陀螺仪，轻滤波
@@ -81,36 +85,52 @@ namespace nav_data_handle {
         // 读取
         double P_init     = this->get_parameter("eskf.P_init").as_double();
         double Q_init     = this->get_parameter("eskf.Q_init").as_double();
-        double R_init     = this->get_parameter("eskf.R_init").as_double();
-        double R_tilt_init = this->get_parameter("eskf.R_tilt_init").as_double();
+        double r_11       = this->get_parameter("eskf.r_11").as_double();
+        double r_22       = this->get_parameter("eskf.r_22").as_double();
+        double r_33       = this->get_parameter("eskf.r_33").as_double();
+        double r_44       = this->get_parameter("eskf.r_44").as_double();
+        double r_tilt_11  = this->get_parameter("eskf.r_tilt_11").as_double();
+        double r_tilt_22  = this->get_parameter("eskf.r_tilt_22").as_double();
         calibration_duration_  = this->get_parameter("eskf.calibration_duration").as_double();
         alpha_lowpass_         = this->get_parameter("eskf.alpha_lowpass").as_double();
         alpha_lowpass_gyro_    = this->get_parameter("eskf.alpha_lowpass_gyro").as_double();
 
         // 参数有效性检查
-        if (P_init <= 0.0 || Q_init <= 0.0 || R_init <= 0.0 || R_tilt_init <= 0.0) {
+        if (P_init <= 0.0 || Q_init <= 0.0 ||
+            r_11 <= 0.0 || r_22 <= 0.0 || r_33 <= 0.0 || r_44 <= 0.0 ||
+            r_tilt_11 <= 0.0 || r_tilt_22 <= 0.0) {
             RCLCPP_ERROR(
                 this->get_logger(),
-                "ESKF 噪声参数必须为正数！收到 P=%.6f, Q=%.6f, R=%.6f, R_tilt=%.6f，"
-                "将使用默认值",
-                P_init, Q_init, R_init, R_tilt_init);
+                "ESKF 噪声参数必须为正数！收到 P=%.6f, Q=%.6f, "
+                "r_11=%.6f, r_22=%.6f, r_33=%.6f, r_44=%.6f, "
+                "r_tilt_11=%.6f, r_tilt_22=%.6f，将使用默认值",
+                P_init, Q_init,
+                r_11, r_22, r_33, r_44,
+                r_tilt_11, r_tilt_22);
             P_init     = 0.01;
             Q_init     = 0.005;
-            R_init     = 0.005;
-            R_tilt_init = 0.005;
+            r_11 = r_22 = r_33 = r_44 = 0.005;
+            r_tilt_11 = r_tilt_22 = 0.005;
         }
 
         P_      = Eigen::Matrix<double, 15, 15>::Identity() * P_init;
         Q_      = Eigen::Matrix<double, 15, 15>::Identity() * Q_init;
-        R_      = Eigen::Matrix4d::Identity() * R_init;
-        // 临时将R_对角线上第四个元素设为100
-        //R_(3, 3) = 100.0;
-        R_tilt_ = Eigen::Matrix2d::Identity() * R_tilt_init;
+        R_      = Eigen::Matrix4d::Zero();
+        R_(0, 0) = r_11;
+        R_(1, 1) = r_22;
+        R_(2, 2) = r_33;
+        R_(3, 3) = r_44;
+        R_tilt_ = Eigen::Matrix2d::Zero();
+        R_tilt_(0, 0) = r_tilt_11;
+        R_tilt_(1, 1) = r_tilt_22;
 
         RCLCPP_INFO(
             this->get_logger(),
-            "ESKF 参数已加载: P=%.6f, Q=%.6f, R=%.6f, R_tilt=%.6f, calibration=%.2fs",
-            P_init, Q_init, R_init, R_tilt_init, calibration_duration_);
+            "ESKF 参数已加载: P=%.6f, Q=%.6f, "
+            "R=[%.6f %.6f %.6f %.6f], R_tilt=[%.6f %.6f], calibration=%.2fs",
+            P_init, Q_init,
+            r_11, r_22, r_33, r_44,
+            r_tilt_11, r_tilt_22, calibration_duration_);
     }
 
     void NavDataHandle::gimbalCallBack(
