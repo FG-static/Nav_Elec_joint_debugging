@@ -443,10 +443,7 @@ namespace nav_data_handle {
         H.block<3, 3>(0, 3) = R_T;
 
         // 速度部分对 δθ 的偏导：∂(R^T * v_)/∂δθ = [R^T * v_]× = [v_body]×
-        Eigen::Matrix3d v_anti;
-        v_anti <<        0, -v_body.z(),  v_body.y(),
-                   v_body.z(),        0, -v_body.x(),
-                  -v_body.y(),  v_body.x(),        0;
+        Eigen::Matrix3d v_anti = skew_symmetric(v_body); // TODO: just change need attention
         H.block<3, 3>(0, 6) = v_anti;
 
         // 角速度部分对 δθ 的偏导：
@@ -484,6 +481,27 @@ namespace nav_data_handle {
                     innov(3), h_x(3), y(3),
                     Kk(14, 3), dbg_z, b_g_.z(),
                     P_(14, 14));
+            }
+        }
+
+        // 诊断：转弯启停时打印 v_anti 对 heading 的耦合
+        // 当机器人有前进速度 vx 时，侧滑 vy 的误差会通过 v_anti 影响航向
+        {
+            static bool was_turning = false;
+            bool is_turning = std::abs(y(3)) > 0.15;  // wz > 0.15 rad/s 视为转弯中
+            if (is_turning != was_turning) {
+                was_turning = is_turning;
+                Eigen::Vector4d innov = y - h_x;
+                // v_anti 贡献的 heading 修正量：δθ_z += Kk(8,0)*innov_vx + Kk(8,1)*innov_vy
+                double dtheta_z_from_v = Kk(8, 0) * innov(0) + Kk(8, 1) * innov(1);
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "TURN %s: vx=%.3f vy=%.3f | innov_vx=%.4f innov_vy=%.4f innov_wz=%.4f | "
+                    "dθ_z_from_v=%.6f | b_g_z=%.4f",
+                    is_turning ? "START" : "STOP",
+                    v_body.x(), v_body.y(),
+                    innov(0), innov(1), innov(3),
+                    dtheta_z_from_v, b_g_.z());
             }
         }
 
