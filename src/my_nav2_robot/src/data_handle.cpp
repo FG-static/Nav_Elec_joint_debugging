@@ -193,15 +193,18 @@ namespace nav_data_handle {
                     double acc_norm = mean_acc.norm();
                     double acc_near_gravity = std::abs(acc_norm - 9.8);
                     if (acc_norm > 1.0 && acc_near_gravity < 2.0) {
+
                         // mean_acc 是反作用力，与重力方向相反，取反得到重力方向
                         Eigen::Vector3d g_dir = -mean_acc / acc_norm;
-                        double roll  = std::asin(std::clamp(g_dir.y(), -1.0, 1.0));
-                        double pitch = std::atan2(-g_dir.x(), -g_dir.z());
+                        double 
+                            roll  = std::asin(std::clamp(g_dir.y(), -1.0, 1.0)),
+                            pitch = std::atan2(-g_dir.x(), -g_dir.z());
 
-                        double sp = std::sin(pitch);
-                        double cp = std::cos(pitch);
-                        double sr = std::sin(roll);
-                        double cr = std::cos(roll);
+                        double 
+                            sp = std::sin(pitch),
+                            cp = std::cos(pitch),
+                            sr = std::sin(roll),
+                            cr = std::cos(roll);
 
                         // R_imu_to_body = (R_body_to_imu)^T = R_x(-roll) * R_y(-pitch)
                         R_imu_to_body_ << cp,    0.0,  -sp,
@@ -214,6 +217,7 @@ namespace nav_data_handle {
                             pitch * 180.0 / M_PI, pitch,
                             roll * 180.0 / M_PI, roll);
                     } else {
+
                         RCLCPP_WARN(
                             this->get_logger(),
                             "mean_acc 范数异常 (%.2f)，R_imu_to_body 保持单位阵",
@@ -270,10 +274,12 @@ namespace nav_data_handle {
             return;
         }
         if (dt > 0.5) {
+
             RCLCPP_WARN(
                 this->get_logger(),
                 "dt=%.4fs 严重偏大，ESKF 积分精度下降，请检查串口丢帧", dt);
         } else if (dt > 0.05) {
+            
             RCLCPP_WARN(this->get_logger(), "dt=%.4fs 偏大，仍执行ESKF", dt);
         }
 

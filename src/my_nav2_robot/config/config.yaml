@@ -3,7 +3,7 @@ data_handle_node:
   ros__parameters:
     # 零偏标定时长（秒）：上电后车辆静止期间累积 IMU 数据的时长
     # 范围 1.0~3.0s，期间车辆必须保持静止
-    eskf.calibration_duration: 1.5
+    eskf.calibration_duration: 3.0
 
     # 状态误差协方差初始值 (15×15 对角线标量)
     eskf.P_init: 0.01
@@ -37,5 +37,5 @@ data_handle_node:
 
     # 低通滤波平滑系数  y[n] = alpha * x[n] + (1-alpha) * y[n-1]
     # 值越小 -> 滤波越强，越平滑，滞后越大；值越大 -> 越贴近原始数据
-    eskf.alpha_lowpass: 1.0       # 加速度计 + 轮速（重滤波，压制噪声）
-    eskf.alpha_lowpass_gyro: 1.0   # 陀螺仪（轻滤波，保留动态响应）
+    eskf.alpha_lowpass: 0.3       # 加速度计 + 轮速（重滤波，压制噪声）
+    eskf.alpha_lowpass_gyro: 0.05   # 陀螺仪（轻滤波，保留动态响应）
