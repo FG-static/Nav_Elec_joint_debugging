@@ -61,11 +61,9 @@ namespace nav_data_handle {
         v_raw_.setZero();
         q_raw_.setIdentity();
 
-        // IMU 外参标定矩阵（IMU 系 → 车体系）
-        // 通过离线标定获得，消除 IMU 安装角误差
-        R_imu_to_body_ << 0.989909644, -0.000470780,  0.141699244,
-                          -0.000470780,  0.999978035,  0.006611176,
-                          -0.141699244, -0.006611176,  0.989887679;
+        // IMU 外参标定矩阵（IMU 系 → 车体系），初始化为单位阵
+        // 实际值将在零偏标定阶段根据重力方向自动计算（仅 pitch/roll，忽略 yaw）
+        R_imu_to_body_.setIdentity();
 
         // 从配置文件加载 P、Q、R、R_tilt 参数
         loadESKFParams();
@@ -180,6 +178,49 @@ namespace nav_data_handle {
                 Eigen::Vector3d mean_acc  = calib_acc_sum_  / calib_count_;
                 Eigen::Vector3d mean_gyro = calib_gyro_sum_ / calib_count_;
 
+                // ====== 从重力方向自动计算 R_imu_to_body_（仅 pitch/roll） ======
+                // 车辆静止水平时，加速度计测量反作用力（静止时 z 轴向上 +9.8），
+                // 而重力方向在 ENU 体坐标系为 [0, 0, -9.8]，两者方向相反。
+                // mean_acc ≈ R^T * [0, 0, +9.8] + b_a_true，零偏 << 重力
+                // 故重力方向 g_dir = -mean_acc / |mean_acc|
+                //
+                // g_imu = R_body_to_imu * [0, 0, -9.8]  (归一化后)
+                // R_body_to_imu = R_y(pitch) * R_x(roll)，yaw 不可观故置零
+                // g_dir = [-sin(pitch)*cos(roll), sin(roll), -cos(pitch)*cos(roll)]
+                //   → roll  = asin(g_dir.y)
+                //   → pitch = atan2(-g_dir.x, -g_dir.z)
+                {
+                    double acc_norm = mean_acc.norm();
+                    double acc_near_gravity = std::abs(acc_norm - 9.8);
+                    if (acc_norm > 1.0 && acc_near_gravity < 2.0) {
+                        // mean_acc 是反作用力，与重力方向相反，取反得到重力方向
+                        Eigen::Vector3d g_dir = -mean_acc / acc_norm;
+                        double roll  = std::asin(std::clamp(g_dir.y(), -1.0, 1.0));
+                        double pitch = std::atan2(-g_dir.x(), -g_dir.z());
+
+                        double sp = std::sin(pitch);
+                        double cp = std::cos(pitch);
+                        double sr = std::sin(roll);
+                        double cr = std::cos(roll);
+
+                        // R_imu_to_body = (R_body_to_imu)^T = R_x(-roll) * R_y(-pitch)
+                        R_imu_to_body_ << cp,    0.0,  -sp,
+                                          sp*sr, cr,   cp*sr,
+                                          sp*cr, -sr,  cp*cr;
+
+                        RCLCPP_INFO(
+                            this->get_logger(),
+                            "R_imu_to_body 自动计算完成: pitch=%.4f°(%.4frad), roll=%.4f°(%.4frad)",
+                            pitch * 180.0 / M_PI, pitch,
+                            roll * 180.0 / M_PI, roll);
+                    } else {
+                        RCLCPP_WARN(
+                            this->get_logger(),
+                            "mean_acc 范数异常 (%.2f)，R_imu_to_body 保持单位阵",
+                            acc_norm);
+                    }
+                }
+
                 // 零偏设定：
                 // 陀螺仪零偏 = 静止时陀螺仪输出的均值
                 // 加速度计零偏 = 静止时原始帧测量均值 - 原始帧下重力反作用力
@@ -223,10 +264,17 @@ namespace nav_data_handle {
         // 用 MCU 采样时间戳差分计算 dt（单位 s）
         // uint32_t 减法自然处理溢出回绕（约 49 天才绕一圈）
         double dt = static_cast<double>(msg->t_ms - last_t_ms_) / 1000.0;
-        if (dt <= 0.0 || dt > 0.1) {
-            // 跳帧或 t_ms 异常，更新记录但跳过本轮 ESKF
+        if (dt <= 0.0) {
+            // t_ms 异常（通常为第一帧或回绕），跳过本轮 ESKF
             last_t_ms_ = msg->t_ms;
             return;
+        }
+        if (dt > 0.5) {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "dt=%.4fs 严重偏大，ESKF 积分精度下降，请检查串口丢帧", dt);
+        } else if (dt > 0.05) {
+            RCLCPP_WARN(this->get_logger(), "dt=%.4fs 偏大，仍执行ESKF", dt);
         }
 
         // 低通滤波
@@ -578,7 +626,7 @@ namespace nav_data_handle {
         if (calib_state_ != CalibState::RUNNING) return;
 
         double dt = static_cast<double>(last_t_ms_ - last_t_ms_raw_) / 1000.0;
-        if (last_t_ms_raw_ == 0 || dt <= 0.0 || dt > 0.1) {
+        if (last_t_ms_raw_ == 0 || dt <= 0.0) {
             last_t_ms_raw_ = last_t_ms_;
             return;
         }

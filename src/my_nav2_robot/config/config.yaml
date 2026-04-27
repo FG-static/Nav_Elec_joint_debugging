@@ -27,7 +27,7 @@ data_handle_node:
     eskf.r_11: 0.005
     eskf.r_22: 0.005
     eskf.r_33: 0.005
-    eskf.r_44: 0.05
+    eskf.r_44: 0.025
 
     # 零倾斜观测噪声 (2×2 对角元素)
     # r_tilt_11: pitch 约束噪声, r_tilt_22: roll 约束噪声
