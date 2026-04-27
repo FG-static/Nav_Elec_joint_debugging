@@ -127,7 +127,7 @@ Foxglove Studio 是一个开源的机器人数据可视化工具，通过 WebSoc
 
 ```bash
 # 安装（如未安装）
-sudo apt install ros-humble-foxglove-bridge
+sudo apt install ros-jazzy-foxglove-bridge
 
 # 启动
 ros2 launch foxglove_bridge foxglove_bridge_launch.xml
@@ -193,7 +193,7 @@ socat -v /dev/ttyACM0,raw,echo=0,ispeed=115200,ospeed=115200 TCP-LISTEN:8888,reu
 socat -d -d pty,link=/tmp/ttyACM0,raw,echo=0 TCP:<电脑A的IP>:8888,tcp-nodelay
 
 # 2. 另一终端：source 并构建工作空间
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 cd ~/ace_ass && colcon build
 source install/setup.bash
 
@@ -215,7 +215,7 @@ sudo chmod 666 /dev/ttyACM0
 sudo ln -sf /dev/ttyACM0 /tmp/ttyACM0
 
 # 3. 启动系统
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 source ~/ace_ass/install/setup.bash
 ros2 launch my_nav2_robot full.launch.py
 ```
@@ -226,4 +226,4 @@ ros2 launch my_nav2_robot full.launch.py
 
 - [socat 官方手册](https://linux.die.net/man/1/socat)
 - [Foxglove Studio 官方文档](https://foxglove.dev/docs)
-- [ros-humble-foxglove-bridge](https://index.ros.org/p/foxglove_bridge/)
+- [ros-jazzy-foxglove-bridge](https://index.ros.org/p/foxglove_bridge/)

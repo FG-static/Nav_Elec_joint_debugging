@@ -40,6 +40,12 @@ namespace nav_data_handle {
         bias_gyro_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
             "/bias_gyro", 10
         );
+        acc_compensated_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
+            "/acc_compensated", 10
+        );
+        gyro_compensated_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
+            "/gyro_compensated", 10
+        );
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(* this);
 
         // 初始化ESKF变量
@@ -57,9 +63,9 @@ namespace nav_data_handle {
 
         // IMU 外参标定矩阵（IMU 系 → 车体系）
         // 通过离线标定获得，消除 IMU 安装角误差
-        R_imu_to_body_ << 0.999892758, -0.000146531,  0.014644162,
-                          -0.000146531,  0.999799785,  0.020009186,
-                          -0.014644162, -0.020009188,  0.999692543;
+        R_imu_to_body_ << 0.989909644, -0.000470780,  0.141699244,
+                          -0.000470780,  0.999978035,  0.006611176,
+                          -0.141699244, -0.006611176,  0.989887679;
 
         // 从配置文件加载 P、Q、R、R_tilt 参数
         loadESKFParams();
@@ -72,6 +78,8 @@ namespace nav_data_handle {
         // 声明
         this->declare_parameter("eskf.P_init", 0.01);
         this->declare_parameter("eskf.Q_init", 0.005);
+        this->declare_parameter("eskf.q_b_a", 0.001);
+        this->declare_parameter("eskf.q_b_g", 0.001);
         this->declare_parameter("eskf.r_11", 0.005);
         this->declare_parameter("eskf.r_22", 0.005);
         this->declare_parameter("eskf.r_33", 0.005);
@@ -85,6 +93,8 @@ namespace nav_data_handle {
         // 读取
         double P_init     = this->get_parameter("eskf.P_init").as_double();
         double Q_init     = this->get_parameter("eskf.Q_init").as_double();
+        double q_b_a      = this->get_parameter("eskf.q_b_a").as_double();
+        double q_b_g      = this->get_parameter("eskf.q_b_g").as_double();
         double r_11       = this->get_parameter("eskf.r_11").as_double();
         double r_22       = this->get_parameter("eskf.r_22").as_double();
         double r_33       = this->get_parameter("eskf.r_33").as_double();
@@ -96,25 +106,29 @@ namespace nav_data_handle {
         alpha_lowpass_gyro_    = this->get_parameter("eskf.alpha_lowpass_gyro").as_double();
 
         // 参数有效性检查
-        if (P_init <= 0.0 || Q_init <= 0.0 ||
+        if (P_init <= 0.0 || Q_init <= 0.0 || q_b_a <= 0.0 || q_b_g <= 0.0 ||
             r_11 <= 0.0 || r_22 <= 0.0 || r_33 <= 0.0 || r_44 <= 0.0 ||
             r_tilt_11 <= 0.0 || r_tilt_22 <= 0.0) {
             RCLCPP_ERROR(
                 this->get_logger(),
-                "ESKF 噪声参数必须为正数！收到 P=%.6f, Q=%.6f, "
+                "ESKF 噪声参数必须为正数！收到 P=%.6f, Q=%.6f, q_b_a=%.6f, q_b_g=%.6f, "
                 "r_11=%.6f, r_22=%.6f, r_33=%.6f, r_44=%.6f, "
                 "r_tilt_11=%.6f, r_tilt_22=%.6f，将使用默认值",
-                P_init, Q_init,
+                P_init, Q_init, q_b_a, q_b_g,
                 r_11, r_22, r_33, r_44,
                 r_tilt_11, r_tilt_22);
             P_init     = 0.01;
             Q_init     = 0.005;
+            q_b_a = q_b_g = 0.001;
             r_11 = r_22 = r_33 = r_44 = 0.005;
             r_tilt_11 = r_tilt_22 = 0.005;
         }
 
         P_      = Eigen::Matrix<double, 15, 15>::Identity() * P_init;
         Q_      = Eigen::Matrix<double, 15, 15>::Identity() * Q_init;
+        // 零偏部分使用独立噪声量（b_a: 9-11, b_g: 12-14）
+        Q_.block<3, 3>(9,  9) = Eigen::Matrix3d::Identity() * q_b_a;
+        Q_.block<3, 3>(12, 12) = Eigen::Matrix3d::Identity() * q_b_g;
         R_      = Eigen::Matrix4d::Zero();
         R_(0, 0) = r_11;
         R_(1, 1) = r_22;
@@ -126,9 +140,9 @@ namespace nav_data_handle {
 
         RCLCPP_INFO(
             this->get_logger(),
-            "ESKF 参数已加载: P=%.6f, Q=%.6f, "
+            "ESKF 参数已加载: P=%.6f, Q=%.6f, Q_bias=[%.8f %.8f], "
             "R=[%.6f %.6f %.6f %.6f], R_tilt=[%.6f %.6f], calibration=%.2fs",
-            P_init, Q_init,
+            P_init, Q_init, q_b_a, q_b_g,
             r_11, r_22, r_33, r_44,
             r_tilt_11, r_tilt_22, calibration_duration_);
     }
@@ -255,6 +269,15 @@ namespace nav_data_handle {
         observeWheel();
         observeZeroTilt();
         injectAndReset();
+
+        // 发布补偿后的 IMU 数据（IMU 系，已扣除零偏）
+        geometry_msgs::msg::Vector3 acc_comp_msg, gyro_comp_msg;
+        Eigen::Vector3d acc_comp = acc_filtered_ - b_a_;
+        Eigen::Vector3d gyro_comp = gyro_filtered_ - b_g_;
+        acc_comp_msg.x = acc_comp.x(); acc_comp_msg.y = acc_comp.y(); acc_comp_msg.z = acc_comp.z();
+        gyro_comp_msg.x = gyro_comp.x(); gyro_comp_msg.y = gyro_comp.y(); gyro_comp_msg.z = gyro_comp.z();
+        acc_compensated_pub_->publish(acc_comp_msg);
+        gyro_compensated_pub_->publish(gyro_comp_msg);
 
         // visualizer（用 ROS 系统时间戳，保持 TF/Nav2 兼容性）
         publishOdometry(msg->header.stamp);
@@ -391,6 +414,24 @@ namespace nav_data_handle {
 
         // 更新误差状态 delta_x
         delta_x_ += Kk * (y - h_x);
+
+        // 诊断：每隔 ~200 帧（约 1 秒）打印一轮 innovation 和 b_g 更新量
+        {
+            static int diag_cnt = 0;
+            if (++diag_cnt >= 200) {
+                diag_cnt = 0;
+                Eigen::Vector4d innov = y - h_x;
+                double dbg_z = Kk(14, 3) * innov(3);
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "DIAG: innov_wz=%.4f, h_x_wz=%.4f, y_wz=%.4f, "
+                    "Kk_bg_z=%.8f, Δb_g_z=%.6f, b_g_z=%.4f, "
+                    "P_bg_z=%.8f",
+                    innov(3), h_x(3), y(3),
+                    Kk(14, 3), dbg_z, b_g_.z(),
+                    P_(14, 14));
+            }
+        }
 
         // 更新状态误差协方差矩阵（Joseph 形式）
         Eigen::Matrix<double, 15, 15> I15 =
