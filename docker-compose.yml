@@ -1,0 +1,40 @@
+# ============================================================
+# RoboMaster 导航系统 — Docker Compose 配置
+#
+# 使用方法:
+#   1. 构建镜像:    docker compose build
+#   2. 启动完整栈:  docker compose up -d
+#   3. 查看日志:    docker compose logs -f
+#   4. 停止:        docker compose down
+#
+# 首次使用前:
+#   - 确认串口设备路径（默认 /dev/ttyACM0）
+#   - 如需改参数，编辑 config/config.yaml 后重启容器即可
+# ============================================================
+
+services:
+  robomaster:
+    build: .
+    image: robomaster-nav:latest
+    container_name: robomaster-nav
+    network_mode: host          # ROS2 DDS 需要 UDP 多播
+    privileged: false
+    restart: unless-stopped
+
+    # ── 串口设备 ───────────────────────────────────────────
+    devices:
+      - /dev/ttyACM0:/dev/ttyACM0
+    # 若设备名不同，改成实际路径，例如:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
+
+    # ── 配置文件挂载（修改 config.yaml 后重启容器即生效） ──
+    volumes:
+      - ./src/my_nav2_robot/config:/ros2_ws/src/my_nav2_robot/config:ro
+      - ./src/serial_driver/config:/ros2_ws/src/serial_driver/config:ro
+
+    # ── 环境变量 ───────────────────────────────────────────
+    environment:
+      - ROS_DOMAIN_ID=0
+
+    # ── 启动模式 ───────────────────────────────────────────
+    command: full

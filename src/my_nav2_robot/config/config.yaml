@@ -3,7 +3,7 @@ data_handle_node:
   ros__parameters:
     # 零偏标定时长（秒）：上电后车辆静止期间累积 IMU 数据的时长
     # 范围 1.0~3.0s，期间车辆必须保持静止
-    eskf.calibration_duration: 3.0
+    eskf.calibration_duration: 2.0
 
     # 状态误差协方差初始值 (15×15 对角线标量)
     eskf.P_init: 0.01
@@ -24,8 +24,8 @@ data_handle_node:
     # r_11: vx 观测噪声, r_22: vy 观测噪声
     # r_33: vz (零速约束) 观测噪声, r_44: wz 观测噪声
     # 值越大 → 越不信任对应维度的轮速观测，轮速打滑时可增大相应元素
-    eskf.r_11: 0.05    # 增大以减少 v_anti 对 heading 的耦合（转弯航向反转修复）
-    eskf.r_22: 0.05    # vy 噪声天然大（全向轮侧滑），大幅减弱 heading 修正
+    eskf.r_11: 0.01    # 增大以减少 v_anti 对 heading 的耦合（转弯航向反转修复）
+    eskf.r_22: 0.01    # vy 噪声天然大（全向轮侧滑），大幅减弱 heading 修正
     eskf.r_33: 0.005
     eskf.r_44: 0.025
 
@@ -38,4 +38,4 @@ data_handle_node:
     # 低通滤波平滑系数  y[n] = alpha * x[n] + (1-alpha) * y[n-1]
     # 值越小 -> 滤波越强，越平滑，滞后越大；值越大 -> 越贴近原始数据
     eskf.alpha_lowpass: 0.3       # 加速度计 + 轮速（重滤波，压制噪声）
-    eskf.alpha_lowpass_gyro: 0.13   # 陀螺仪（轻滤波，保留动态响应）
+    eskf.alpha_lowpass_gyro: 0.3   # 陀螺仪（适度响应，捕捉刹车反向脉冲，防止转弯过头）

@@ -1,0 +1,10 @@
+# 忽略构建产物和开发文件
+build/
+install/
+log/
+.vscode/
+.claude/
+*.code-workspace
+.git/
+*.md
+!CLAUDE.md

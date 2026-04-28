@@ -178,44 +178,45 @@ namespace nav_data_handle {
                 Eigen::Vector3d mean_acc  = calib_acc_sum_  / calib_count_;
                 Eigen::Vector3d mean_gyro = calib_gyro_sum_ / calib_count_;
 
-                // ====== 从重力方向自动计算 R_imu_to_body_（仅 pitch/roll） ======
-                // 车辆静止水平时，加速度计测量反作用力（静止时 z 轴向上 +9.8），
-                // 而重力方向在 ENU 体坐标系为 [0, 0, -9.8]，两者方向相反。
-                // mean_acc ≈ R^T * [0, 0, +9.8] + b_a_true，零偏 << 重力
-                // 故重力方向 g_dir = -mean_acc / |mean_acc|
-                //
-                // g_imu = R_body_to_imu * [0, 0, -9.8]  (归一化后)
-                // R_body_to_imu = R_y(pitch) * R_x(roll)，yaw 不可观故置零
-                // g_dir = [-sin(pitch)*cos(roll), sin(roll), -cos(pitch)*cos(roll)]
-                //   → roll  = asin(g_dir.y)
-                //   → pitch = atan2(-g_dir.x, -g_dir.z)
+                // ====== 从重力方向自动计算 R_imu_to_body_（Rodrigues 旋转法） ======
+                // 与 imu_static_level_calibrate.cpp 方法一致
+                // 静止时 mean_acc ≈ R_imu_to_body_^T * [0,0,+g]（反作用力沿体系 Z 轴向上）
+                // 归一化 mean_acc 得到 IMU 帧下的反作用力方向 s
+                // 目标方向 t = [0,0,±1]，使得 R * s = t（旋转后反作用力沿 Z 轴）
+                // 用 Rodrigues 旋转公式构造最小旋转 R：source→target
+                // yaw 不可观测，Rodrigues 法自然只修正 pitch/roll 分量
                 {
                     double acc_norm = mean_acc.norm();
                     double acc_near_gravity = std::abs(acc_norm - 9.8);
                     if (acc_norm > 1.0 && acc_near_gravity < 2.0) {
 
-                        // mean_acc 是反作用力，与重力方向相反，取反得到重力方向
-                        Eigen::Vector3d g_dir = -mean_acc / acc_norm;
-                        double 
-                            roll  = std::asin(std::clamp(g_dir.y(), -1.0, 1.0)),
-                            pitch = std::atan2(-g_dir.x(), -g_dir.z());
+                        Eigen::Vector3d s = mean_acc / acc_norm;  // source：IMU帧反作用力方向
+                        Eigen::Vector3d t(0.0, 0.0, s.z() >= 0.0 ? 1.0 : -1.0);  // target：体系Z轴
 
-                        double 
-                            sp = std::sin(pitch),
-                            cp = std::cos(pitch),
-                            sr = std::sin(roll),
-                            cr = std::cos(roll);
+                        // 旋转轴 v = s × t
+                        Eigen::Vector3d v = s.cross(t);
+                        double sin_theta = v.norm();
+                        double cos_theta = s.dot(t);
 
-                        // R_imu_to_body = (R_body_to_imu)^T = R_x(-roll) * R_y(-pitch)
-                        R_imu_to_body_ << cp,    0.0,  -sp,
-                                          sp*sr, cr,   cp*sr,
-                                          sp*cr, -sr,  cp*cr;
+                        if (sin_theta < 1e-9) {
+                            // 已对齐，使用单位阵
+                            R_imu_to_body_ = Eigen::Matrix3d::Identity();
+                        } else {
+                            // 反对称矩阵 K
+                            Eigen::Matrix3d K;
+                            K <<      0, -v.z(),  v.y(),
+                                 v.z(),      0, -v.x(),
+                                -v.y(),  v.x(),      0;
+
+                            // Rodrigues: R = I + K + ((1-cos)/sin²) * K²
+                            double gain = (1.0 - cos_theta) / (sin_theta * sin_theta);
+                            R_imu_to_body_ = Eigen::Matrix3d::Identity() + K + gain * K * K;
+                        }
 
                         RCLCPP_INFO(
                             this->get_logger(),
-                            "R_imu_to_body 自动计算完成: pitch=%.4f°(%.4frad), roll=%.4f°(%.4frad)",
-                            pitch * 180.0 / M_PI, pitch,
-                            roll * 180.0 / M_PI, roll);
+                            "R_imu_to_body 自动计算完成(Rodrigues): cos=%.6f, sin=%.6f",
+                            cos_theta, sin_theta);
                     } else {
 
                         RCLCPP_WARN(
@@ -268,9 +269,10 @@ namespace nav_data_handle {
         // 用 MCU 采样时间戳差分计算 dt（单位 s）
         // uint32_t 减法自然处理溢出回绕（约 49 天才绕一圈）
         double dt = static_cast<double>(msg->t_ms - last_t_ms_) / 1000.0;
-        if (dt <= 0.0) {
+        if (dt <= 0.0 || dt >= 0.7) {
             // t_ms 异常（通常为第一帧或回绕），跳过本轮 ESKF
             last_t_ms_ = msg->t_ms;
+            RCLCPP_WARN(this->get_logger(), "dt=%.4fs 异常，跳过解算", dt);
             return;
         }
         if (dt > 0.5) {
@@ -283,10 +285,12 @@ namespace nav_data_handle {
             RCLCPP_WARN(this->get_logger(), "dt=%.4fs 偏大，仍执行ESKF", dt);
         }
 
-        // 低通滤波
-        // y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
-        // 陀螺仪：alpha 较大（响应快，避免角速度滞后影响航向估计）
-        // 加速度计 + 轮速：alpha 较小（平滑强，压制噪声和冲击）
+        // 低通滤波（dt 自适应）
+        // 从配置的 alpha（针对标称 5ms 帧间隔）换算时间常数 tau
+        //   alpha = 1 - exp(-dt_nom / tau)  →  tau = -dt_nom / log(1 - alpha)
+        // 然后对实际 dt 计算自适应 alpha：alpha_adapt = 1 - exp(-dt / tau)
+        // 这样大 dt 时滤波减弱（更贴近原始数据），避免滞后放大 innovation
+        constexpr double DT_NOM = 0.005;  // 标称帧间隔 5ms（200Hz）
 
         // 缓存原始未滤波数据（供 publishRawOdometry 使用）
         acc_raw_   = Eigen::Vector3d(
@@ -301,27 +305,48 @@ namespace nav_data_handle {
                          msg->wheel_velocity.x, msg->wheel_velocity.y,
                          msg->wheel_velocity.z, msg->wheel_velocity.w);
 
-        gyro_filtered_ = alpha_lowpass_gyro_ * Eigen::Vector3d(
+        // 计算自适应 alpha（仅在 alpha != 1 时，1 表示不过滤）
+        // 大 dt 时 alpha 会暴涨，导致噪声穿通，必须加上限
+        double alpha_gyro = alpha_lowpass_gyro_;
+        double alpha_wheel = alpha_lowpass_;
+        if (alpha_lowpass_gyro_ < 1.0) {
+            double tau_gyro = -DT_NOM / std::log(1.0 - alpha_lowpass_gyro_);
+            alpha_gyro = std::min(1.0 - std::exp(-dt / tau_gyro), 0.2);
+        }
+        if (alpha_lowpass_ < 1.0) {
+            double tau_wheel = -DT_NOM / std::log(1.0 - alpha_lowpass_);
+            alpha_wheel = std::min(1.0 - std::exp(-dt / tau_wheel), 0.5);
+        }
+        alpha_gyro = alpha_lowpass_gyro_;
+        alpha_wheel = alpha_lowpass_;
+
+        gyro_filtered_ = alpha_gyro * Eigen::Vector3d(
                              msg->angular_velocity.x,
                              msg->angular_velocity.y,
                              msg->angular_velocity.z)
-                       + (1.0 - alpha_lowpass_gyro_) * gyro_filtered_;
+                       + (1.0 - alpha_gyro) * gyro_filtered_;
 
-        acc_filtered_  = alpha_lowpass_ * Eigen::Vector3d(
+        acc_filtered_  = alpha_wheel * Eigen::Vector3d(
                              msg->linear_acceleration.x,
                              msg->linear_acceleration.y,
                              msg->linear_acceleration.z)
-                       + (1.0 - alpha_lowpass_) * acc_filtered_;
+                       + (1.0 - alpha_wheel) * acc_filtered_;
 
-        wheel_filtered_ = alpha_lowpass_ * Eigen::Vector4d(
+        wheel_filtered_ = alpha_wheel * Eigen::Vector4d(
                               msg->wheel_velocity.x, msg->wheel_velocity.y,
                               msg->wheel_velocity.z, msg->wheel_velocity.w)
-                        + (1.0 - alpha_lowpass_) * wheel_filtered_;
+                        + (1.0 - alpha_wheel) * wheel_filtered_;
 
-        // ESKF（使用滤波后数据）
-        predict(dt);
+        // ESKF predict — 大 dt 时拆成多个子步，防止 P_ 协方差膨胀导致 Kk 暴增
+        constexpr double DT_MAX = 0.005;  // 子步最大 20ms
+        int n_steps = std::max(1, static_cast<int>(std::ceil(dt / DT_MAX)));
+        double dt_sub = dt / n_steps;
+        for (int i = 0; i < n_steps; i++) {
+            predict(dt_sub);
+        }
         observeWheel();
         observeZeroTilt();
+        constrainYawRate(dt_sub);  // 直线抗漂移软约束（用子步 dt 近似）
         injectAndReset();
 
         // 发布补偿后的 IMU 数据（IMU 系，已扣除零偏）
@@ -571,6 +596,51 @@ namespace nav_data_handle {
         P_ = (I15 - Kk * H) * P_ *
              (I15 - Kk * H).transpose() +
              Kk * R_tilt_ * Kk.transpose();
+    }
+
+    void NavDataHandle::constrainYawRate(double dt)
+    {
+        // 直线行驶时软约束：yaw rate ≈ 0
+        // 当陀螺仪和轮速一致认为 |wz| 很小时，将当前帧的航向变化约束为零，
+        // 抑制电机振动导致的 wz 震荡积分漂移
+
+        // 计算两种 wz 源
+        Eigen::Vector3d w_body = R_imu_to_body_ * (gyro_filtered_ - b_g_);
+        double wz_gyro = w_body.z();
+
+        constexpr double kWz = 0.0815 / (4.0 * 0.2125);
+        double wz_wheel = kWz * (-wheel_filtered_[0] + wheel_filtered_[1]
+                                 - wheel_filtered_[2] + wheel_filtered_[3]);
+
+        // 激活条件：两传感器一致确认 |wz| < 阈值，且车辆有前进速度
+        constexpr double kWzThresh = 0.15;  // rad/s，低于此值视为「直线」
+        if (std::abs(wz_gyro) > kWzThresh || std::abs(wz_wheel) > kWzThresh) return;
+        if (v_.norm() < 0.1) return;  // 静止时不约束，避免干扰零速状态
+
+        // 观测：y = 0（零航向变化），h_x = wz_gyro * dt（本帧预测航向变化）
+        double y = 0.0;
+        double h_x = wz_gyro * dt;
+
+        // 雅可比 H (1×15)
+        // ∂(wz_gyro*dt)/∂δθ = 0（角速度测量不依赖姿态误差）
+        // ∂(wz_gyro*dt)/∂δb_g = -R_imu_to_body_.row(2) * dt
+        Eigen::Matrix<double, 1, 15> H = Eigen::Matrix<double, 1, 15>::Zero();
+        H.block<1, 3>(0, 12) = -R_imu_to_body_.row(2) * dt;
+
+        // 大噪声 → 软约束（只作偏置慢修正，不完全压制真实小幅度转动）
+        constexpr double R_yaw = 0.2;
+        double S_val = (H * P_ * H.transpose())(0, 0) + R_yaw;
+        Eigen::Matrix<double, 15, 1> Kk =
+            P_ * H.transpose() * (1.0 / S_val);
+
+        delta_x_ += Kk * (y - h_x);
+
+        // Joseph 协方差更新
+        Eigen::Matrix<double, 15, 15> I15 =
+            Eigen::Matrix<double, 15, 15>::Identity();
+        P_ = (I15 - Kk * H) * P_ *
+             (I15 - Kk * H).transpose() +
+             Kk * R_yaw * Kk.transpose();
     }
 
     void NavDataHandle::injectAndReset() {

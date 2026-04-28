@@ -4,6 +4,7 @@ install/
 log/
 *.gv
 *.pdf
+imu_static_level_calibrate.cpp
 
 # --- Python & System ---
 __pycache__/

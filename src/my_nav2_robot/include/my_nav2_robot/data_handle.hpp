@@ -41,6 +41,7 @@ namespace nav_data_handle {
         void predict(double dt);
         void observeWheel();
         void observeZeroTilt();
+        void constrainYawRate(double dt);  // 直线行驶时软约束 yaw rate ≈ 0，抗振动漂移
         void injectAndReset();
 
         // 接收 发布
