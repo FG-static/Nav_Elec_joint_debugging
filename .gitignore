@@ -14,6 +14,9 @@ __pycache__/
 .venv/
 env/
 venv/
+nav_debug1/
+nav_debug2/
+程序设计报告.md
 
 # --- IDE & Editors ---
 .cache/
@@ -35,3 +38,4 @@ imu_coordinate.md
 .claude/
 .codebuddy/
 task-workflow-skill.md
+analysis/

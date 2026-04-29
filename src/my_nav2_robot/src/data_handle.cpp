@@ -46,6 +46,12 @@ namespace nav_data_handle {
         gyro_compensated_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
             "/gyro_compensated", 10
         );
+        wheel_vel_raw_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
+            "/wheel_vel/raw", 10
+        );
+        wheel_vel_filtered_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
+            "/wheel_vel/filtered", 10
+        );
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(* this);
 
         // 初始化ESKF变量
@@ -76,10 +82,13 @@ namespace nav_data_handle {
         // 声明
         this->declare_parameter("eskf.P_init", 0.01);
         this->declare_parameter("eskf.Q_init", 0.005);
+        this->declare_parameter("eskf.q_theta", 0.0001);
         this->declare_parameter("eskf.q_b_a", 0.001);
         this->declare_parameter("eskf.q_b_g", 0.001);
         this->declare_parameter("eskf.r_11", 0.005);
         this->declare_parameter("eskf.r_22", 0.005);
+        this->declare_parameter("eskf.r_11_high", 0.05);
+        this->declare_parameter("eskf.r_22_high", 0.05);
         this->declare_parameter("eskf.r_33", 0.005);
         this->declare_parameter("eskf.r_44", 0.005);
         this->declare_parameter("eskf.r_tilt_11", 0.005);
@@ -91,10 +100,13 @@ namespace nav_data_handle {
         // 读取
         double P_init     = this->get_parameter("eskf.P_init").as_double();
         double Q_init     = this->get_parameter("eskf.Q_init").as_double();
+        double q_theta    = this->get_parameter("eskf.q_theta").as_double();
         double q_b_a      = this->get_parameter("eskf.q_b_a").as_double();
         double q_b_g      = this->get_parameter("eskf.q_b_g").as_double();
         double r_11       = this->get_parameter("eskf.r_11").as_double();
         double r_22       = this->get_parameter("eskf.r_22").as_double();
+        double r_11_high  = this->get_parameter("eskf.r_11_high").as_double();
+        double r_22_high  = this->get_parameter("eskf.r_22_high").as_double();
         double r_33       = this->get_parameter("eskf.r_33").as_double();
         double r_44       = this->get_parameter("eskf.r_44").as_double();
         double r_tilt_11  = this->get_parameter("eskf.r_tilt_11").as_double();
@@ -105,25 +117,35 @@ namespace nav_data_handle {
 
         // 参数有效性检查
         if (P_init <= 0.0 || Q_init <= 0.0 || q_b_a <= 0.0 || q_b_g <= 0.0 ||
-            r_11 <= 0.0 || r_22 <= 0.0 || r_33 <= 0.0 || r_44 <= 0.0 ||
+            r_11 <= 0.0 || r_22 <= 0.0 || r_11_high <= 0.0 || r_22_high <= 0.0 ||
+            r_33 <= 0.0 || r_44 <= 0.0 ||
             r_tilt_11 <= 0.0 || r_tilt_22 <= 0.0) {
             RCLCPP_ERROR(
                 this->get_logger(),
                 "ESKF 噪声参数必须为正数！收到 P=%.6f, Q=%.6f, q_b_a=%.6f, q_b_g=%.6f, "
-                "r_11=%.6f, r_22=%.6f, r_33=%.6f, r_44=%.6f, "
+                "r_11=%.6f, r_22=%.6f, r_11_high=%.6f, r_22_high=%.6f, "
+                "r_33=%.6f, r_44=%.6f, "
                 "r_tilt_11=%.6f, r_tilt_22=%.6f，将使用默认值",
                 P_init, Q_init, q_b_a, q_b_g,
-                r_11, r_22, r_33, r_44,
+                r_11, r_22, r_11_high, r_22_high,
+                r_33, r_44,
                 r_tilt_11, r_tilt_22);
             P_init     = 0.01;
             Q_init     = 0.005;
             q_b_a = q_b_g = 0.001;
-            r_11 = r_22 = r_33 = r_44 = 0.005;
+            r_11 = r_22 = r_11_high = r_22_high = r_33 = r_44 = 0.005;
             r_tilt_11 = r_tilt_22 = 0.005;
         }
+        // 存储高低档参数（成员变量，observeWheel 中自适应使用）
+        r_11_low_  = r_11;
+        r_22_low_  = r_22;
+        r_11_high_ = r_11_high;
+        r_22_high_ = r_22_high;
 
         P_      = Eigen::Matrix<double, 15, 15>::Identity() * P_init;
         Q_      = Eigen::Matrix<double, 15, 15>::Identity() * Q_init;
+        // δθ 部分独立噪声（6-8），压制 v_anti heading 随机游走
+        Q_.block<3, 3>(6,  6) = Eigen::Matrix3d::Identity() * q_theta;
         // 零偏部分使用独立噪声量（b_a: 9-11, b_g: 12-14）
         Q_.block<3, 3>(9,  9) = Eigen::Matrix3d::Identity() * q_b_a;
         Q_.block<3, 3>(12, 12) = Eigen::Matrix3d::Identity() * q_b_g;
@@ -317,8 +339,8 @@ namespace nav_data_handle {
             double tau_wheel = -DT_NOM / std::log(1.0 - alpha_lowpass_);
             alpha_wheel = std::min(1.0 - std::exp(-dt / tau_wheel), 0.5);
         }
-        alpha_gyro = alpha_lowpass_gyro_;
-        alpha_wheel = alpha_lowpass_;
+        //alpha_gyro = alpha_lowpass_gyro_;
+        //alpha_wheel = alpha_lowpass_;
 
         gyro_filtered_ = alpha_gyro * Eigen::Vector3d(
                              msg->angular_velocity.x,
@@ -337,17 +359,54 @@ namespace nav_data_handle {
                               msg->wheel_velocity.z, msg->wheel_velocity.w)
                         + (1.0 - alpha_wheel) * wheel_filtered_;
 
+        // 发布滤波前后的轮速解算速度 (vx, vy)，x 分量 = vx，y 分量 = vy
+        constexpr double kWv = 0.0815 / (4.0 * 0.7071067811865476);
+        {
+            auto pub_vec = [&](const Eigen::Vector4d &wv, auto &pub) {
+                geometry_msgs::msg::Vector3 msg;
+                msg.x = kWv * ( wv[0] + wv[1] + wv[2] + wv[3]);
+                msg.y = kWv * (-wv[0] + wv[1] + wv[2] - wv[3]);
+                msg.z = 0.0;
+                pub->publish(msg);
+            };
+            pub_vec(wheel_raw_, wheel_vel_raw_pub_);
+            pub_vec(wheel_filtered_, wheel_vel_filtered_pub_);
+        }
+
         // ESKF predict — 大 dt 时拆成多个子步，防止 P_ 协方差膨胀导致 Kk 暴增
         constexpr double DT_MAX = 0.005;  // 子步最大 20ms
         int n_steps = std::max(1, static_cast<int>(std::ceil(dt / DT_MAX)));
         double dt_sub = dt / n_steps;
+        last_dt_ = dt_sub;  // 供 injectAndReset 反算融合 wz
         for (int i = 0; i < n_steps; i++) {
             predict(dt_sub);
         }
+        double dtheta_z_before = delta_x_(8);
         observeWheel();
+        double dtheta_z_after_wheel = delta_x_(8);
         observeZeroTilt();
-        constrainYawRate(dt_sub);  // 直线抗漂移软约束（用子步 dt 近似）
+        double dtheta_z_after_tilt = delta_x_(8);
+        constrainYawRate(dt_sub);
+        double dtheta_z_after_yaw = delta_x_(8);
         injectAndReset();
+
+        // 诊断：每个观测对 δθ_z 的贡献（每 200 帧打印一次）
+        {
+            static int dcnt = 0;
+            static double sum_wheel = 0, sum_tilt = 0, sum_yaw = 0;
+            sum_wheel += (dtheta_z_after_wheel - dtheta_z_before);
+            sum_tilt  += (dtheta_z_after_tilt - dtheta_z_after_wheel);
+            sum_yaw   += (dtheta_z_after_yaw - dtheta_z_after_tilt);
+            if (++dcnt >= 200) {
+                RCLCPP_WARN(this->get_logger(),
+                    "δθ_z 来源(累积200帧): wheel=%+.4f° tilt=%+.4f° yawConstr=%+.4f° total=%+.4f°",
+                    sum_wheel * 180.0 / M_PI,
+                    sum_tilt * 180.0 / M_PI,
+                    sum_yaw * 180.0 / M_PI,
+                    (sum_wheel + sum_tilt + sum_yaw) * 180.0 / M_PI);
+                dcnt = 0; sum_wheel = sum_tilt = sum_yaw = 0;
+            }
+        }
 
         // 发布补偿后的 IMU 数据（IMU 系，已扣除零偏）
         geometry_msgs::msg::Vector3 acc_comp_msg, gyro_comp_msg;
@@ -467,8 +526,8 @@ namespace nav_data_handle {
         // 速度部分对 δv 的偏导：∂(R^T * v_)/∂δv = R^T
         H.block<3, 3>(0, 3) = R_T;
 
-        // 速度部分对 δθ 的偏导：∂(R^T * v_)/∂δθ = [R^T * v_]× = [v_body]×
-        Eigen::Matrix3d v_anti = skew_symmetric(v_body); // TODO: just change need attention
+        // 速度部分对 δθ 的偏导：∂(R^T * v_)/∂δθ = [v_body]×
+        Eigen::Matrix3d v_anti = skew_symmetric(v_body);
         H.block<3, 3>(0, 6) = v_anti;
 
         // 角速度部分对 δθ 的偏导：
@@ -482,6 +541,15 @@ namespace nav_data_handle {
         //      = R_imu_to_body_.row(2) * (gyro_filtered_ - b_g_)
         // ∂h_w/∂δb_g = -R_imu_to_body_.row(2)（精确值，含 x/y 交叉项）
         H.block<1, 3>(3, 12) = -R_imu_to_body_.row(2);
+
+        // 自适应 R(0,0)/R(1,1)：直走时用小 R（强 v_anti 防漂移），转弯时用大 R（弱 v_anti 防反转）
+        // 过渡区间：|wz| ∈ [0.15, 0.35] rad/s 线性插值
+        {
+            double wz_mag = std::max(std::abs(w_body_clean.z()), std::abs(y(3)));
+            double alpha = std::clamp((wz_mag - 0.15) / 0.20, 0.0, 1.0);
+            R_(0, 0) = r_11_low_ + alpha * (r_11_high_ - r_11_low_);
+            R_(1, 1) = r_22_low_ + alpha * (r_22_high_ - r_22_low_);
+        }
 
         // 卡尔曼增益 Kk (15×4)
         auto S = H * P_ * H.transpose() + R_;
@@ -537,14 +605,16 @@ namespace nav_data_handle {
              (I15 - Kk * H).transpose() +
              Kk * R_ * Kk.transpose();
 
-        // 发布wz
-        Eigen::Vector3d w_imu   = gyro_filtered_ - b_g_;
-        geometry_msgs::msg::Vector3 wz_msg;
-        Eigen::Vector3d w = R_imu_to_body_ * w_imu;
-        wz_msg.x = y(3);
-        wz_msg.y = w(2);
-        wz_msg.z = 0.0;
-        wz_pub_->publish(wz_msg);
+        // 发布wz: x=轮速wz, y=IMU gyro wz, z=ESKF卡尔曼融合wz
+        {
+            Eigen::Vector3d w_imu  = gyro_filtered_ - b_g_;
+            Eigen::Vector3d w_body = R_imu_to_body_ * w_imu;
+            geometry_msgs::msg::Vector3 wz_msg;
+            wz_msg.x = y(3);
+            wz_msg.y = w_body(2);
+            wz_msg.z = fused_wz_;
+            wz_pub_->publish(wz_msg);
+        }
     }
 
     void NavDataHandle::observeZeroTilt()
@@ -644,6 +714,12 @@ namespace nav_data_handle {
     }
 
     void NavDataHandle::injectAndReset() {
+
+        // 保存 ESKF 融合角速度（IMU predict + 所有观测的最优估计）
+        // fused_wz = w_imu + δθ_z / dt，即 predict 基础 + 卡尔曼修正
+        Eigen::Vector3d w_imu  = R_imu_to_body_ * (gyro_filtered_ - b_g_);
+        Eigen::Vector3d dtheta = delta_x_.segment<3>(6);
+        fused_wz_ = w_imu.z() + dtheta.z() / last_dt_;
 
         // 获取真实状态
         p_ += delta_x_.segment<3>(0);

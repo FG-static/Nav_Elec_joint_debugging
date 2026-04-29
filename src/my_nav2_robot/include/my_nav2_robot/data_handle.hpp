@@ -60,6 +60,8 @@ namespace nav_data_handle {
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr bias_gyro_pub_;
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr acc_compensated_pub_;
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gyro_compensated_pub_;
+        rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr wheel_vel_raw_pub_;
+        rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr wheel_vel_filtered_pub_;
         std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     
         // 名义状态
@@ -75,6 +77,10 @@ namespace nav_data_handle {
         // 误差状态
         Eigen::Matrix<double, 15, 1> delta_x_; // 状态误差
 
+        // ESKF 融合角速度（IMU gyro + 轮速 wz + v_anti，卡尔曼最优加权）
+        double fused_wz_ = 0.0;
+        double last_dt_ = 0.005;
+
         // 状态误差协方差矩阵
         Eigen::Matrix<double, 15, 15> P_;
 
@@ -82,6 +88,10 @@ namespace nav_data_handle {
         Eigen::Matrix<double, 15, 15> Q_; // 过程噪声
         Eigen::Matrix4d R_; // 观测噪声 - observeWheel 观测量 vx, vy, vz, wz
         Eigen::Matrix2d R_tilt_; // 观测噪声 - observeZeroTilt 观测量 pitch, roll
+
+        // 自适应 R: 直走(小)→转弯(大)平滑过渡，兼顾防漂移和防反转
+        double r_11_low_ = 0.005, r_22_low_ = 0.005;
+        double r_11_high_ = 0.05, r_22_high_ = 0.05;
 
         // 零偏标定状态机
         enum class CalibState { CALIBRATING, RUNNING };

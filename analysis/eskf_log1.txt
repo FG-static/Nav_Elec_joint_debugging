@@ -1,0 +1,156 @@
+[INFO] [1777478180.253586574] [DataHandleNode]: ESKF 参数已加载: P=0.010000, Q=0.005000, Q_bias=[0.00100000 0.00100000], R=[0.005000 0.005000 0.005000 0.005000], R_tilt=[0.005000 0.005000], calibration=1.50s
+[INFO] [1777478180.253742425] [DataHandleNode]: ESKF Data Handle Node Initialized
+[INFO] [1777478181.855944009] [DataHandleNode]: R_imu_to_body 自动计算完成(Rodrigues): cos=0.998918, sin=0.046516
+[INFO] [1777478181.856014777] [DataHandleNode]: 零偏标定完成（301 帧，1.50s）: b_a=[0.0050, 0.0018, -0.1152], b_g=[0.002141, 0.000223, -0.036053]
+[WARN] [1777478182.899573953] [DataHandleNode]: DIAG: innov_wz=0.0040, h_x_wz=0.0103, y_wz=0.0143, Kk_bg_z=-0.35786873, Δb_g_z=-0.001429, b_g_z=-0.0307, P_bg_z=0.00322547
+[WARN] [1777478182.900520294] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+7.5128° tilt=-0.1219° yawConstr=+0.0000° total=+7.3909°
+[WARN] [1777478183.899752134] [DataHandleNode]: DIAG: innov_wz=-0.0300, h_x_wz=0.0178, y_wz=-0.0123, Kk_bg_z=-0.35786868, Δb_g_z=0.010741, b_g_z=0.0086, P_bg_z=0.00349776
+[WARN] [1777478183.900217768] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=-1.8077° tilt=-0.0970° yawConstr=-0.0000° total=-1.9047°
+[WARN] [1777478184.605359094] [DataHandleNode]: dt=0.0750s 偏大，仍执行ESKF
+[WARN] [1777478184.763614318] [DataHandleNode]: dt=0.0800s 偏大，仍执行ESKF
+[WARN] [1777478185.098881097] [DataHandleNode]: dt=0.1900s 偏大，仍执行ESKF
+[WARN] [1777478185.374557719] [DataHandleNode]: DIAG: innov_wz=0.0452, h_x_wz=0.0382, y_wz=0.0833, Kk_bg_z=-0.35786867, Δb_g_z=-0.016165, b_g_z=0.0108, P_bg_z=0.00368050
+[WARN] [1777478185.375724787] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=-1.0864° tilt=-0.2136° yawConstr=-0.0000° total=-1.3000°
+[WARN] [1777478186.374224812] [DataHandleNode]: DIAG: innov_wz=-0.0131, h_x_wz=0.0236, y_wz=0.0104, Kk_bg_z=-0.35786956, Δb_g_z=0.004701, b_g_z=-0.0832, P_bg_z=0.00372526
+[WARN] [1777478186.374658035] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=-1.7504° tilt=-0.0194° yawConstr=-0.0000° total=-1.7698°
+[WARN] [1777478187.074849869] [DataHandleNode]: TURN START: vx=0.007 vy=0.006 | innov_vx=-0.0104 innov_vy=-0.0083 innov_wz=0.0337 | dθ_z_from_v=0.000751 | b_g_z=-0.0761
+[WARN] [1777478187.410739091] [DataHandleNode]: DIAG: innov_wz=0.0014, h_x_wz=1.3551, y_wz=1.3565, Kk_bg_z=-0.35786978, Δb_g_z=-0.000505, b_g_z=-0.2601, P_bg_z=0.00374460
+[WARN] [1777478187.411508398] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+0.9314° tilt=+0.0009° yawConstr=+0.0000° total=+0.9323°
+[WARN] [1777478188.135898762] [DataHandleNode]: TURN STOP: vx=0.013 vy=-0.008 | innov_vx=0.0033 innov_vy=-0.0017 innov_wz=0.0474 | dθ_z_from_v=0.000865 | b_g_z=0.8604
+[WARN] [1777478188.409621357] [DataHandleNode]: DIAG: innov_wz=0.0152, h_x_wz=0.0463, y_wz=0.0615, Kk_bg_z=-0.35786978, Δb_g_z=-0.005429, b_g_z=0.0220, P_bg_z=0.00375228
+[WARN] [1777478188.410072335] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=-2.9101° tilt=+0.0041° yawConstr=+0.0000° total=-2.9060°
+[WARN] [1777478188.463436171] [DataHandleNode]: TURN START: vx=-0.002 vy=-0.022 | innov_vx=0.0062 innov_vy=-0.0060 innov_wz=0.0281 | dθ_z_from_v=-0.001395 | b_g_z=-0.0406
+[WARN] [1777478188.609983304] [DataHandleNode]: TURN STOP: vx=-0.002 vy=-0.007 | innov_vx=0.0023 innov_vy=0.0075 innov_wz=-0.0226 | dθ_z_from_v=-0.001883 | b_g_z=0.0610
+[WARN] [1777478189.410301940] [DataHandleNode]: DIAG: innov_wz=-0.0195, h_x_wz=-0.0121, y_wz=-0.0316, Kk_bg_z=-0.35786904, Δb_g_z=0.006983, b_g_z=-0.0206, P_bg_z=0.00375533
+[WARN] [1777478189.411176182] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+0.4215° tilt=+0.0018° yawConstr=+0.0000° total=+0.4233°
+[WARN] [1777478190.409913590] [DataHandleNode]: DIAG: innov_wz=0.0226, h_x_wz=0.0754, y_wz=0.0980, Kk_bg_z=-0.35786828, Δb_g_z=-0.008083, b_g_z=-0.0004, P_bg_z=0.00375658
+[WARN] [1777478190.410367219] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=-0.7953° tilt=+0.0394° yawConstr=-0.0000° total=-0.7560°
+[WARN] [1777478191.409740839] [DataHandleNode]: DIAG: innov_wz=0.0111, h_x_wz=0.0459, y_wz=0.0570, Kk_bg_z=-0.35786835, Δb_g_z=-0.003989, b_g_z=-0.0285, P_bg_z=0.00375711
+[WARN] [1777478191.410315456] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=-5.2282° tilt=+0.0506° yawConstr=-0.0000° total=-5.1775°
+[WARN] [1777478192.440141344] [DataHandleNode]: DIAG: innov_wz=0.0396, h_x_wz=-0.0019, y_wz=0.0378, Kk_bg_z=-0.35786903, Δb_g_z=-0.014185, b_g_z=0.0076, P_bg_z=0.00375733
+[WARN] [1777478192.441798115] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+9.6713° tilt=+0.0650° yawConstr=-0.0000° total=+9.7363°
+[WARN] [1777478193.502205034] [DataHandleNode]: TURN START: vx=-0.006 vy=-0.010 | innov_vx=-0.0112 innov_vy=-0.0081 innov_wz=0.0039 | dθ_z_from_v=-0.001645 | b_g_z=-0.0837
+[WARN] [1777478193.513738430] [DataHandleNode]: DIAG: innov_wz=-0.0157, h_x_wz=0.1602, y_wz=0.1445, Kk_bg_z=-0.35786979, Δb_g_z=0.005627, b_g_z=-0.0833, P_bg_z=0.00376018
+[WARN] [1777478193.513805193] [DataHandleNode]: TURN STOP: vx=-0.016 vy=-0.022 | innov_vx=0.0051 innov_vy=0.0002 innov_wz=-0.0157 | dθ_z_from_v=-0.001907 | b_g_z=-0.0833
+[WARN] [1777478193.514324781] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+5.1515° tilt=+0.0016° yawConstr=-0.0000° total=+5.1531°
+[WARN] [1777478193.526057105] [DataHandleNode]: TURN START: vx=-0.011 vy=-0.018 | innov_vx=0.0043 innov_vy=0.0114 innov_wz=-0.0053 | dθ_z_from_v=-0.001672 | b_g_z=-0.0605
+[WARN] [1777478194.581438921] [DataHandleNode]: DIAG: innov_wz=0.0190, h_x_wz=0.2391, y_wz=0.2582, Kk_bg_z=-0.35786977, Δb_g_z=-0.006803, b_g_z=0.8067, P_bg_z=0.00375863
+[WARN] [1777478194.581892185] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=-1.4095° tilt=-0.0017° yawConstr=+0.0000° total=-1.4112°
+[WARN] [1777478194.594976272] [DataHandleNode]: TURN STOP: vx=-0.002 vy=-0.015 | innov_vx=0.0035 innov_vy=0.0012 innov_wz=0.0257 | dθ_z_from_v=-0.001730 | b_g_z=0.7865
+[WARN] [1777478194.757195209] [DataHandleNode]: TURN START: vx=-0.016 vy=-0.005 | innov_vx=-0.0040 innov_vy=-0.0031 innov_wz=0.0755 | dθ_z_from_v=-0.000078 | b_g_z=0.1316
+[WARN] [1777478194.935272696] [DataHandleNode]: TURN STOP: vx=0.004 vy=-0.006 | innov_vx=0.0049 innov_vy=-0.0065 innov_wz=-0.0133 | dθ_z_from_v=0.000167 | b_g_z=0.1142
+[WARN] [1777478195.599295979] [DataHandleNode]: DIAG: innov_wz=0.0197, h_x_wz=-0.0165, y_wz=0.0032, Kk_bg_z=-0.35786934, Δb_g_z=-0.007046, b_g_z=-0.0183, P_bg_z=0.00375792
+[WARN] [1777478195.599806413] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=-3.0207° tilt=+0.0090° yawConstr=+0.0000° total=-3.0117°
+[WARN] [1777478195.900537797] [DataHandleNode]: dt=0.0700s 偏大，仍执行ESKF
+[WARN] [1777478196.084520066] [DataHandleNode]: dt=0.0950s 偏大，仍执行ESKF
+[WARN] [1777478196.482828681] [DataHandleNode]: dt=0.1100s 偏大，仍执行ESKF
+[WARN] [1777478196.486035798] [DataHandleNode]: dt=0.3250s 偏大，仍执行ESKF
+[WARN] [1777478196.639625138] [DataHandleNode]: dt=0.1250s 偏大，仍执行ESKF
+[WARN] [1777478196.819520096] [DataHandleNode]: dt=0.0750s 偏大，仍执行ESKF
+[WARN] [1777478197.079086505] [DataHandleNode]: dt=0.1550s 偏大，仍执行ESKF
+[WARN] [1777478197.170796061] [DataHandleNode]: dt=0.0700s 偏大，仍执行ESKF
+[WARN] [1777478197.351929374] [DataHandleNode]: dt=0.0850s 偏大，仍执行ESKF
+[WARN] [1777478197.589405311] [DataHandleNode]: dt=0.0750s 偏大，仍执行ESKF
+[WARN] [1777478197.595055040] [DataHandleNode]: dt=0.1200s 偏大，仍执行ESKF
+[WARN] [1777478197.707043022] [DataHandleNode]: dt=0.0850s 偏大，仍执行ESKF
+[WARN] [1777478197.914692421] [DataHandleNode]: dt=0.0800s 偏大，仍执行ESKF
+[WARN] [1777478198.546811861] [DataHandleNode]: dt=0.0800s 偏大，仍执行ESKF
+[WARN] [1777478198.567405823] [DataHandleNode]: dt=0.0600s 偏大，仍执行ESKF
+[WARN] [1777478198.583709457] [DataHandleNode]: DIAG: innov_wz=-0.0042, h_x_wz=-0.0178, y_wz=-0.0220, Kk_bg_z=-0.35801227, Δb_g_z=0.001513, b_g_z=-0.0068, P_bg_z=0.00376082
+[WARN] [1777478198.584592661] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=-4.4519° tilt=+2.9469° yawConstr=-0.0000° total=-1.5050°
+[WARN] [1777478199.574595658] [DataHandleNode]: DIAG: innov_wz=0.0234, h_x_wz=-0.0958, y_wz=-0.0724, Kk_bg_z=-0.35786887, Δb_g_z=-0.008378, b_g_z=0.0137, P_bg_z=0.00375813
+[WARN] [1777478199.576030885] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+13.0046° tilt=-0.1186° yawConstr=+0.0000° total=+12.8860°
+[WARN] [1777478200.574076685] [DataHandleNode]: DIAG: innov_wz=0.0017, h_x_wz=-0.0018, y_wz=-0.0001, Kk_bg_z=-0.35786977, Δb_g_z=-0.000615, b_g_z=-0.0001, P_bg_z=0.00375775
+[WARN] [1777478200.574432394] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+14.8706° tilt=-0.0073° yawConstr=-0.0000° total=+14.8634°
+[WARN] [1777478200.972174293] [DataHandleNode]: TURN START: vx=-0.004 vy=0.001 | innov_vx=0.0019 innov_vy=0.0032 innov_wz=0.0602 | dθ_z_from_v=0.000534 | b_g_z=-0.0494
+[WARN] [1777478201.580237343] [DataHandleNode]: DIAG: innov_wz=-0.0278, h_x_wz=1.7428, y_wz=1.7150, Kk_bg_z=-0.35786977, Δb_g_z=0.009935, b_g_z=-0.0082, P_bg_z=0.00375764
+[WARN] [1777478201.581202302] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=-4.5740° tilt=+0.0025° yawConstr=+0.0000° total=-4.5715°
+[WARN] [1777478202.020128695] [DataHandleNode]: dt=0.0550s 偏大，仍执行ESKF
+[WARN] [1777478202.022573015] [DataHandleNode]: dt=0.0650s 偏大，仍执行ESKF
+[WARN] [1777478202.027364481] [DataHandleNode]: TURN STOP: vx=0.013 vy=-0.002 | innov_vx=-0.0028 innov_vy=-0.0001 innov_wz=0.0030 | dθ_z_from_v=0.002630 | b_g_z=0.7883
+[WARN] [1777478202.115153912] [DataHandleNode]: TURN START: vx=0.006 vy=0.006 | innov_vx=0.0108 innov_vy=-0.0009 innov_wz=0.2155 | dθ_z_from_v=0.001680 | b_g_z=0.6747
+[WARN] [1777478202.477088958] [DataHandleNode]: TURN STOP: vx=-0.008 vy=0.014 | innov_vx=0.0086 innov_vy=0.0082 innov_wz=-0.0337 | dθ_z_from_v=0.003782 | b_g_z=0.1988
+[WARN] [1777478202.616951820] [DataHandleNode]: dt=0.2100s 偏大，仍执行ESKF
+[WARN] [1777478202.625692028] [DataHandleNode]: TURN START: vx=-0.031 vy=0.014 | innov_vx=0.0060 innov_vy=-0.0128 innov_wz=0.1861 | dθ_z_from_v=-0.000009 | b_g_z=0.2286
+[WARN] [1777478202.785775866] [DataHandleNode]: dt=0.0550s 偏大，仍执行ESKF
+[WARN] [1777478202.788022706] [DataHandleNode]: dt=0.0550s 偏大，仍执行ESKF
+[WARN] [1777478202.796143692] [DataHandleNode]: TURN STOP: vx=0.012 vy=0.003 | innov_vx=-0.0012 innov_vy=-0.0102 innov_wz=-0.0752 | dθ_z_from_v=0.003710 | b_g_z=0.0853
+[WARN] [1777478202.964250014] [DataHandleNode]: dt=0.0600s 偏大，仍执行ESKF
+[WARN] [1777478202.965379312] [DataHandleNode]: TURN START: vx=0.018 vy=0.019 | innov_vx=0.0097 innov_vy=-0.0010 innov_wz=0.0907 | dθ_z_from_v=-0.000867 | b_g_z=0.0935
+[WARN] [1777478203.153773992] [DataHandleNode]: dt=0.0700s 偏大，仍执行ESKF
+[WARN] [1777478203.319083501] [DataHandleNode]: dt=0.1100s 偏大，仍执行ESKF
+[WARN] [1777478203.327181938] [DataHandleNode]: TURN STOP: vx=-0.004 vy=0.013 | innov_vx=0.0163 innov_vy=-0.0084 innov_wz=-0.0886 | dθ_z_from_v=0.002225 | b_g_z=0.2116
+[WARN] [1777478203.488290961] [DataHandleNode]: dt=0.0750s 偏大，仍执行ESKF
+[WARN] [1777478203.732412156] [DataHandleNode]: dt=0.1250s 偏大，仍执行ESKF
+[WARN] [1777478203.738960103] [DataHandleNode]: TURN START: vx=0.240 vy=0.001 | innov_vx=0.0183 innov_vy=-0.0029 innov_wz=0.0121 | dθ_z_from_v=-0.028816 | b_g_z=0.1087
+[WARN] [1777478203.846743210] [DataHandleNode]: dt=0.0900s 偏大，仍执行ESKF
+[WARN] [1777478203.851156289] [DataHandleNode]: TURN STOP: vx=0.401 vy=0.021 | innov_vx=-0.0238 innov_vy=0.0038 innov_wz=0.0510 | dθ_z_from_v=-0.001784 | b_g_z=0.1016
+[WARN] [1777478203.944034485] [DataHandleNode]: dt=0.0650s 偏大，仍执行ESKF
+[WARN] [1777478203.951490988] [DataHandleNode]: DIAG: innov_wz=-0.0010, h_x_wz=-0.0962, y_wz=-0.0972, Kk_bg_z=-0.37749918, Δb_g_z=0.000372, b_g_z=-0.0076, P_bg_z=0.00400752
+[WARN] [1777478203.951892151] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=-8.4677° tilt=+0.1468° yawConstr=+0.0000° total=-8.3209°
+[WARN] [1777478204.078783673] [DataHandleNode]: dt=0.0850s 偏大，仍执行ESKF
+[WARN] [1777478204.364180528] [DataHandleNode]: dt=0.0700s 偏大，仍执行ESKF
+[WARN] [1777478204.675633177] [DataHandleNode]: dt=0.0550s 偏大，仍执行ESKF
+[WARN] [1777478205.304810462] [DataHandleNode]: DIAG: innov_wz=0.0152, h_x_wz=0.1075, y_wz=0.1227, Kk_bg_z=-0.35786827, Δb_g_z=-0.005424, b_g_z=-0.0340, P_bg_z=0.00376306
+[WARN] [1777478205.305271246] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+2.4709° tilt=-0.3299° yawConstr=-0.0000° total=+2.1410°
+[WARN] [1777478206.304714852] [DataHandleNode]: DIAG: innov_wz=0.0398, h_x_wz=0.0753, y_wz=0.1151, Kk_bg_z=-0.35786869, Δb_g_z=-0.014257, b_g_z=-0.0788, P_bg_z=0.00375975
+[WARN] [1777478206.305685020] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+0.2413° tilt=+0.1032° yawConstr=-0.0000° total=+0.3445°
+[WARN] [1777478206.989443464] [DataHandleNode]: TURN START: vx=0.089 vy=-0.035 | innov_vx=-0.0030 innov_vy=0.0027 innov_wz=-0.0168 | dθ_z_from_v=0.000181 | b_g_z=0.0682
+[WARN] [1777478207.249186165] [DataHandleNode]: TURN STOP: vx=0.218 vy=-0.027 | innov_vx=-0.0013 innov_vy=0.0029 innov_wz=0.0205 | dθ_z_from_v=0.000141 | b_g_z=-0.0222
+[WARN] [1777478207.259290100] [DataHandleNode]: TURN START: vx=0.220 vy=-0.028 | innov_vx=-0.0031 innov_vy=-0.0056 innov_wz=-0.0134 | dθ_z_from_v=-0.000250 | b_g_z=-0.0354
+[WARN] [1777478207.287257682] [DataHandleNode]: TURN STOP: vx=0.229 vy=-0.033 | innov_vx=0.0042 innov_vy=-0.0075 innov_wz=0.0121 | dθ_z_from_v=-0.000225 | b_g_z=-0.0239
+[WARN] [1777478207.333595210] [DataHandleNode]: DIAG: innov_wz=-0.0110, h_x_wz=-0.1203, y_wz=-0.1312, Kk_bg_z=-0.35786950, Δb_g_z=0.003920, b_g_z=-0.0491, P_bg_z=0.00375839
+[WARN] [1777478207.334021754] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=-1.9609° tilt=+0.0006° yawConstr=-0.0000° total=-1.9603°
+[WARN] [1777478208.338190585] [DataHandleNode]: DIAG: innov_wz=-0.0062, h_x_wz=0.0943, y_wz=0.0882, Kk_bg_z=-0.35786977, Δb_g_z=0.002214, b_g_z=-0.0600, P_bg_z=0.00375786
+[WARN] [1777478208.339030737] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=-0.8610° tilt=+0.0002° yawConstr=+0.0000° total=-0.8608°
+[WARN] [1777478208.366834039] [DataHandleNode]: TURN START: vx=-0.012 vy=-0.032 | innov_vx=0.0004 innov_vy=-0.0068 innov_wz=0.0271 | dθ_z_from_v=-0.002738 | b_g_z=-0.0712
+[WARN] [1777478208.728929582] [DataHandleNode]: TURN STOP: vx=-0.016 vy=-0.049 | innov_vx=-0.0094 innov_vy=-0.0028 innov_wz=-0.0310 | dθ_z_from_v=0.005582 | b_g_z=0.2833
+[WARN] [1777478208.869303372] [DataHandleNode]: TURN START: vx=-0.006 vy=-0.002 | innov_vx=-0.0052 innov_vy=-0.0079 innov_wz=0.0375 | dθ_z_from_v=-0.001301 | b_g_z=0.0712
+[WARN] [1777478209.339429752] [DataHandleNode]: DIAG: innov_wz=-0.0221, h_x_wz=1.4266, y_wz=1.4045, Kk_bg_z=-0.35786977, Δb_g_z=0.007924, b_g_z=0.0075, P_bg_z=0.00375765
+[WARN] [1777478209.340382402] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+5.5101° tilt=-0.0006° yawConstr=+0.0000° total=+5.5094°
+[WARN] [1777478209.875737193] [DataHandleNode]: TURN STOP: vx=0.004 vy=0.003 | innov_vx=0.0030 innov_vy=0.0019 innov_wz=0.0487 | dθ_z_from_v=-0.000260 | b_g_z=0.7647
+[WARN] [1777478210.021572946] [DataHandleNode]: TURN START: vx=0.012 vy=0.029 | innov_vx=-0.0004 innov_vy=-0.0027 innov_wz=0.0402 | dθ_z_from_v=0.001376 | b_g_z=0.1237
+[WARN] [1777478210.333992756] [DataHandleNode]: DIAG: innov_wz=-0.0490, h_x_wz=0.3770, y_wz=0.3280, Kk_bg_z=-0.35786977, Δb_g_z=0.017528, b_g_z=0.2117, P_bg_z=0.00375761
+[WARN] [1777478210.334289005] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+8.6533° tilt=-0.0033° yawConstr=+0.0000° total=+8.6500°
+[WARN] [1777478210.359487147] [DataHandleNode]: TURN STOP: vx=-0.009 vy=0.006 | innov_vx=0.0017 innov_vy=0.0013 innov_wz=-0.0510 | dθ_z_from_v=-0.000337 | b_g_z=0.3068
+[WARN] [1777478210.509688957] [DataHandleNode]: TURN START: vx=-0.007 vy=0.009 | innov_vx=0.0016 innov_vy=0.0021 innov_wz=0.0774 | dθ_z_from_v=-0.000851 | b_g_z=0.0568
+[WARN] [1777478210.814809271] [DataHandleNode]: TURN STOP: vx=-0.002 vy=0.009 | innov_vx=0.0024 innov_vy=-0.0033 innov_wz=-0.0679 | dθ_z_from_v=0.000161 | b_g_z=0.2195
+[WARN] [1777478211.336251985] [DataHandleNode]: DIAG: innov_wz=0.0192, h_x_wz=0.0216, y_wz=0.0408, Kk_bg_z=-0.35786964, Δb_g_z=-0.006857, b_g_z=-0.0233, P_bg_z=0.00375752
+[WARN] [1777478211.336740363] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+1.3978° tilt=-0.0017° yawConstr=-0.0000° total=+1.3961°
+[WARN] [1777478212.374635212] [DataHandleNode]: DIAG: innov_wz=0.0222, h_x_wz=-0.0816, y_wz=-0.0594, Kk_bg_z=-0.35883094, Δb_g_z=-0.007981, b_g_z=0.0401, P_bg_z=0.00376918
+[WARN] [1777478212.374937909] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=-1.3340° tilt=+0.0071° yawConstr=+0.0000° total=-1.3269°
+[WARN] [1777478212.659469488] [DataHandleNode]: TURN START: vx=0.102 vy=-0.007 | innov_vx=-0.0020 innov_vy=-0.0044 innov_wz=-0.0276 | dθ_z_from_v=-0.001238 | b_g_z=0.0480
+[WARN] [1777478212.670382157] [DataHandleNode]: TURN STOP: vx=0.104 vy=-0.009 | innov_vx=-0.0005 innov_vy=-0.0011 innov_wz=-0.0030 | dθ_z_from_v=-0.000064 | b_g_z=0.0579
+[WARN] [1777478212.672200943] [DataHandleNode]: TURN START: vx=0.106 vy=-0.010 | innov_vx=0.0075 innov_vy=-0.0036 innov_wz=-0.0080 | dθ_z_from_v=-0.000877 | b_g_z=0.0590
+[WARN] [1777478212.687583895] [DataHandleNode]: TURN STOP: vx=0.129 vy=-0.009 | innov_vx=0.0036 innov_vy=0.0014 innov_wz=0.0205 | dθ_z_from_v=-0.000363 | b_g_z=0.0587
+[WARN] [1777478212.696835876] [DataHandleNode]: TURN START: vx=0.138 vy=-0.003 | innov_vx=0.0004 innov_vy=0.0010 innov_wz=-0.0259 | dθ_z_from_v=0.000009 | b_g_z=0.0453
+[WARN] [1777478212.845769616] [DataHandleNode]: TURN STOP: vx=0.208 vy=0.000 | innov_vx=-0.0283 innov_vy=-0.0003 innov_wz=0.0346 | dθ_z_from_v=-0.000393 | b_g_z=-0.0009
+[WARN] [1777478213.369809919] [DataHandleNode]: DIAG: innov_wz=-0.0007, h_x_wz=-0.0501, y_wz=-0.0508, Kk_bg_z=-0.35786965, Δb_g_z=0.000243, b_g_z=0.0436, P_bg_z=0.00375749
+[WARN] [1777478213.370261828] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=-4.3642° tilt=+0.0008° yawConstr=+0.0000° total=-4.3634°
+[WARN] [1777478214.062227247] [DataHandleNode]: dt=0.1400s 偏大，仍执行ESKF
+[WARN] [1777478214.180913534] [DataHandleNode]: TURN START: vx=0.017 vy=-0.061 | innov_vx=0.0005 innov_vy=-0.0020 innov_wz=-0.0181 | dθ_z_from_v=-0.000573 | b_g_z=0.0577
+[WARN] [1777478214.184553218] [DataHandleNode]: dt=0.0600s 偏大，仍执行ESKF
+[WARN] [1777478214.345494820] [DataHandleNode]: dt=0.0950s 偏大，仍执行ESKF
+[WARN] [1777478214.347210544] [DataHandleNode]: TURN STOP: vx=0.028 vy=-0.049 | innov_vx=-0.0087 innov_vy=0.0096 innov_wz=0.0667 | dθ_z_from_v=-0.000369 | b_g_z=0.0398
+[WARN] [1777478214.573882082] [DataHandleNode]: dt=0.0600s 偏大，仍执行ESKF
+[WARN] [1777478214.792383057] [DataHandleNode]: dt=0.0600s 偏大，仍执行ESKF
+[WARN] [1777478214.795347027] [DataHandleNode]: dt=0.1050s 偏大，仍执行ESKF
+[WARN] [1777478215.207322523] [DataHandleNode]: dt=0.0750s 偏大，仍执行ESKF
+[WARN] [1777478215.210255900] [DataHandleNode]: dt=0.0800s 偏大，仍执行ESKF
+[WARN] [1777478215.324839717] [DataHandleNode]: dt=0.1200s 偏大，仍执行ESKF
+[WARN] [1777478215.651580651] [DataHandleNode]: dt=0.0700s 偏大，仍执行ESKF
+[WARN] [1777478215.656025419] [DataHandleNode]: dt=0.1150s 偏大，仍执行ESKF
+[WARN] [1777478215.711919386] [DataHandleNode]: dt=0.0850s 偏大，仍执行ESKF
+[WARN] [1777478215.918579775] [DataHandleNode]: dt=0.0650s 偏大，仍执行ESKF
+[WARN] [1777478215.921333606] [DataHandleNode]: dt=0.0750s 偏大，仍执行ESKF
+[WARN] [1777478215.925994856] [DataHandleNode]: DIAG: innov_wz=-0.0004, h_x_wz=0.0004, y_wz=-0.0000, Kk_bg_z=-0.41039400, Δb_g_z=0.000155, b_g_z=0.0002, P_bg_z=0.00445718
+[WARN] [1777478215.926273985] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+2.9143° tilt=+0.0061° yawConstr=+0.0000° total=+2.9204°
+[WARN] [1777478216.125981572] [DataHandleNode]: dt=0.1250s 偏大，仍执行ESKF
+[WARN] [1777478216.432135266] [DataHandleNode]: dt=0.1250s 偏大，仍执行ESKF
+[WARN] [1777478217.272237400] [DataHandleNode]: DIAG: innov_wz=-0.0068, h_x_wz=0.0081, y_wz=0.0013, Kk_bg_z=-0.35786977, Δb_g_z=0.002425, b_g_z=0.0041, P_bg_z=0.00375921
+[WARN] [1777478217.272551784] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+2.2823° tilt=+0.0015° yawConstr=+0.0000° total=+2.2838°
+[WARN] [1777478218.304971455] [DataHandleNode]: DIAG: innov_wz=-0.0048, h_x_wz=-0.0253, y_wz=-0.0301, Kk_bg_z=-0.35786978, Δb_g_z=0.001700, b_g_z=0.0084, P_bg_z=0.00375816
+[WARN] [1777478218.305263501] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+4.5451° tilt=+0.0025° yawConstr=-0.0000° total=+4.5476°
+[WARN] [1777478219.304453242] [DataHandleNode]: DIAG: innov_wz=-0.0001, h_x_wz=0.0001, y_wz=-0.0000, Kk_bg_z=-0.35786977, Δb_g_z=0.000038, b_g_z=-0.0001, P_bg_z=0.00375776
+[WARN] [1777478219.304753170] [DataHandleNode]: δθ_z 来源(累积200帧): wheel=+0.1089° tilt=+0.0001° yawConstr=+0.0000° total=+0.1090°
+[INFO] [1777478229.628003326] [rclcpp]: signal_handler(signum=15)
