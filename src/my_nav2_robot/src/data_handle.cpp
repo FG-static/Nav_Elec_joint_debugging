@@ -120,6 +120,7 @@ namespace nav_data_handle {
             r_11 <= 0.0 || r_22 <= 0.0 || r_11_high <= 0.0 || r_22_high <= 0.0 ||
             r_33 <= 0.0 || r_44 <= 0.0 ||
             r_tilt_11 <= 0.0 || r_tilt_22 <= 0.0) {
+
             RCLCPP_ERROR(
                 this->get_logger(),
                 "ESKF 噪声参数必须为正数！收到 P=%.6f, Q=%.6f, q_b_a=%.6f, q_b_g=%.6f, "
@@ -207,45 +208,43 @@ namespace nav_data_handle {
                 // 目标方向 t = [0,0,±1]，使得 R * s = t（旋转后反作用力沿 Z 轴）
                 // 用 Rodrigues 旋转公式构造最小旋转 R：source→target
                 // yaw 不可观测，Rodrigues 法自然只修正 pitch/roll 分量
-                {
-                    double acc_norm = mean_acc.norm();
-                    double acc_near_gravity = std::abs(acc_norm - 9.8);
-                    if (acc_norm > 1.0 && acc_near_gravity < 2.0) {
+                double acc_norm = mean_acc.norm();
+                double acc_near_gravity = std::abs(acc_norm - 9.8);
+                if (acc_norm > 1.0 && acc_near_gravity < 2.0) {
 
-                        Eigen::Vector3d s = mean_acc / acc_norm;  // source：IMU帧反作用力方向
-                        Eigen::Vector3d t(0.0, 0.0, s.z() >= 0.0 ? 1.0 : -1.0);  // target：体系Z轴
+                    Eigen::Vector3d s = mean_acc / acc_norm;  // source：IMU帧反作用力方向
+                    Eigen::Vector3d t(0.0, 0.0, s.z() >= 0.0 ? 1.0 : -1.0);  // target：体系Z轴
 
-                        // 旋转轴 v = s × t
-                        Eigen::Vector3d v = s.cross(t);
-                        double sin_theta = v.norm();
-                        double cos_theta = s.dot(t);
+                    // 旋转轴 v = s × t
+                    Eigen::Vector3d v = s.cross(t);
+                    double sin_theta = v.norm();
+                    double cos_theta = s.dot(t);
 
-                        if (sin_theta < 1e-9) {
-                            // 已对齐，使用单位阵
-                            R_imu_to_body_ = Eigen::Matrix3d::Identity();
-                        } else {
-                            // 反对称矩阵 K
-                            Eigen::Matrix3d K;
-                            K <<      0, -v.z(),  v.y(),
-                                 v.z(),      0, -v.x(),
-                                -v.y(),  v.x(),      0;
-
-                            // Rodrigues: R = I + K + ((1-cos)/sin²) * K²
-                            double gain = (1.0 - cos_theta) / (sin_theta * sin_theta);
-                            R_imu_to_body_ = Eigen::Matrix3d::Identity() + K + gain * K * K;
-                        }
-
-                        RCLCPP_INFO(
-                            this->get_logger(),
-                            "R_imu_to_body 自动计算完成(Rodrigues): cos=%.6f, sin=%.6f",
-                            cos_theta, sin_theta);
+                    if (sin_theta < 1e-9) {
+                        // 已对齐，使用单位阵
+                        R_imu_to_body_ = Eigen::Matrix3d::Identity();
                     } else {
+                        // 反对称矩阵 K
+                        Eigen::Matrix3d K;
+                        K <<      0, -v.z(),  v.y(),
+                                v.z(),      0, -v.x(),
+                            -v.y(),  v.x(),      0;
 
-                        RCLCPP_WARN(
-                            this->get_logger(),
-                            "mean_acc 范数异常 (%.2f)，R_imu_to_body 保持单位阵",
-                            acc_norm);
+                        // Rodrigues: R = I + K + ((1-cos)/sin²) * K²
+                        double gain = (1.0 - cos_theta) / (sin_theta * sin_theta);
+                        R_imu_to_body_ = Eigen::Matrix3d::Identity() + K + gain * K * K;
                     }
+
+                    RCLCPP_INFO(
+                        this->get_logger(),
+                        "R_imu_to_body 自动计算完成(Rodrigues): cos=%.6f, sin=%.6f",
+                        cos_theta, sin_theta);
+                } else {
+
+                    RCLCPP_WARN(
+                        this->get_logger(),
+                        "mean_acc 范数异常 (%.2f)，R_imu_to_body 保持单位阵",
+                        acc_norm);
                 }
 
                 // 零偏设定：
@@ -292,6 +291,7 @@ namespace nav_data_handle {
         // uint32_t 减法自然处理溢出回绕（约 49 天才绕一圈）
         double dt = static_cast<double>(msg->t_ms - last_t_ms_) / 1000.0;
         if (dt <= 0.0 || dt >= 0.7) {
+
             // t_ms 异常（通常为第一帧或回绕），跳过本轮 ESKF
             last_t_ms_ = msg->t_ms;
             RCLCPP_WARN(this->get_logger(), "dt=%.4fs 异常，跳过解算", dt);
@@ -544,12 +544,10 @@ namespace nav_data_handle {
 
         // 自适应 R(0,0)/R(1,1)：直走时用小 R（强 v_anti 防漂移），转弯时用大 R（弱 v_anti 防反转）
         // 过渡区间：|wz| ∈ [0.15, 0.35] rad/s 线性插值
-        {
-            double wz_mag = std::max(std::abs(w_body_clean.z()), std::abs(y(3)));
-            double alpha = std::clamp((wz_mag - 0.15) / 0.20, 0.0, 1.0);
-            R_(0, 0) = r_11_low_ + alpha * (r_11_high_ - r_11_low_);
-            R_(1, 1) = r_22_low_ + alpha * (r_22_high_ - r_22_low_);
-        }
+        double wz_mag = std::max(std::abs(w_body_clean.z()), std::abs(y(3)));
+        double alpha = std::clamp((wz_mag - 0.15) / 0.20, 0.0, 1.0);
+        R_(0, 0) = r_11_low_ + alpha * (r_11_high_ - r_11_low_);
+        R_(1, 1) = r_22_low_ + alpha * (r_22_high_ - r_22_low_);
 
         // 卡尔曼增益 Kk (15×4)
         auto S = H * P_ * H.transpose() + R_;
@@ -577,27 +575,6 @@ namespace nav_data_handle {
             }
         }
 
-        // 诊断：转弯启停时打印 v_anti 对 heading 的耦合
-        // 当机器人有前进速度 vx 时，侧滑 vy 的误差会通过 v_anti 影响航向
-        {
-            static bool was_turning = false;
-            bool is_turning = std::abs(y(3)) > 0.15;  // wz > 0.15 rad/s 视为转弯中
-            if (is_turning != was_turning) {
-                was_turning = is_turning;
-                Eigen::Vector4d innov = y - h_x;
-                // v_anti 贡献的 heading 修正量：δθ_z += Kk(8,0)*innov_vx + Kk(8,1)*innov_vy
-                double dtheta_z_from_v = Kk(8, 0) * innov(0) + Kk(8, 1) * innov(1);
-                RCLCPP_WARN(
-                    this->get_logger(),
-                    "TURN %s: vx=%.3f vy=%.3f | innov_vx=%.4f innov_vy=%.4f innov_wz=%.4f | "
-                    "dθ_z_from_v=%.6f | b_g_z=%.4f",
-                    is_turning ? "START" : "STOP",
-                    v_body.x(), v_body.y(),
-                    innov(0), innov(1), innov(3),
-                    dtheta_z_from_v, b_g_.z());
-            }
-        }
-
         // 更新状态误差协方差矩阵（Joseph 形式）
         Eigen::Matrix<double, 15, 15> I15 =
             Eigen::Matrix<double, 15, 15>::Identity();
@@ -606,15 +583,13 @@ namespace nav_data_handle {
              Kk * R_ * Kk.transpose();
 
         // 发布wz: x=轮速wz, y=IMU gyro wz, z=ESKF卡尔曼融合wz
-        {
-            Eigen::Vector3d w_imu  = gyro_filtered_ - b_g_;
-            Eigen::Vector3d w_body = R_imu_to_body_ * w_imu;
-            geometry_msgs::msg::Vector3 wz_msg;
-            wz_msg.x = y(3);
-            wz_msg.y = w_body(2);
-            wz_msg.z = fused_wz_;
-            wz_pub_->publish(wz_msg);
-        }
+        Eigen::Vector3d w_imu  = gyro_filtered_ - b_g_;
+        Eigen::Vector3d w_body = R_imu_to_body_ * w_imu;
+        geometry_msgs::msg::Vector3 wz_msg;
+        wz_msg.x = y(3);
+        wz_msg.y = w_body(2);
+        wz_msg.z = fused_wz_;
+        wz_pub_->publish(wz_msg);
     }
 
     void NavDataHandle::observeZeroTilt()
@@ -841,6 +816,7 @@ namespace nav_data_handle {
     void NavDataHandle::odomRawCallback(
         const nav_msgs::msg::Odometry::SharedPtr msg
     ) {
+        
         // 订阅 /odom_raw，实时同步发布小车运动轨迹到 /path_raw
         geometry_msgs::msg::PoseStamped ps;
         ps.header = msg->header;
