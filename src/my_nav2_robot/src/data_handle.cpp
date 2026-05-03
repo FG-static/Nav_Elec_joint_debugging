@@ -96,6 +96,8 @@ namespace nav_data_handle {
         this->declare_parameter("eskf.calibration_duration", 1.5);
         this->declare_parameter("eskf.alpha_lowpass",      0.3); // 加速度计+轮速，重滤波
         this->declare_parameter("eskf.alpha_lowpass_gyro", 0.05);  // 陀螺仪，轻滤波
+        this->declare_parameter("eskf.iter_max", 3);
+        this->declare_parameter("eskf.eps_dx", 0.0001);
 
         // 读取
         double P_init     = this->get_parameter("eskf.P_init").as_double();
@@ -114,6 +116,8 @@ namespace nav_data_handle {
         calibration_duration_  = this->get_parameter("eskf.calibration_duration").as_double();
         alpha_lowpass_         = this->get_parameter("eskf.alpha_lowpass").as_double();
         alpha_lowpass_gyro_    = this->get_parameter("eskf.alpha_lowpass_gyro").as_double();
+        iter_max_              = this->get_parameter("eskf.iter_max").as_int();
+        eps_dx_                = this->get_parameter("eskf.eps_dx").as_double();
 
         // 参数有效性检查
         if (P_init <= 0.0 || Q_init <= 0.0 || q_b_a <= 0.0 || q_b_g <= 0.0 ||
@@ -381,32 +385,8 @@ namespace nav_data_handle {
         for (int i = 0; i < n_steps; i++) {
             predict(dt_sub);
         }
-        double dtheta_z_before = delta_x_(8);
-        observeWheel();
-        double dtheta_z_after_wheel = delta_x_(8);
-        observeZeroTilt();
-        double dtheta_z_after_tilt = delta_x_(8);
-        constrainYawRate(dt_sub);
-        double dtheta_z_after_yaw = delta_x_(8);
-        injectAndReset();
-
-        // 诊断：每个观测对 δθ_z 的贡献（每 200 帧打印一次）
-        {
-            static int dcnt = 0;
-            static double sum_wheel = 0, sum_tilt = 0, sum_yaw = 0;
-            sum_wheel += (dtheta_z_after_wheel - dtheta_z_before);
-            sum_tilt  += (dtheta_z_after_tilt - dtheta_z_after_wheel);
-            sum_yaw   += (dtheta_z_after_yaw - dtheta_z_after_tilt);
-            if (++dcnt >= 200) {
-                RCLCPP_WARN(this->get_logger(),
-                    "δθ_z 来源(累积200帧): wheel=%+.4f° tilt=%+.4f° yawConstr=%+.4f° total=%+.4f°",
-                    sum_wheel * 180.0 / M_PI,
-                    sum_tilt * 180.0 / M_PI,
-                    sum_yaw * 180.0 / M_PI,
-                    (sum_wheel + sum_tilt + sum_yaw) * 180.0 / M_PI);
-                dcnt = 0; sum_wheel = sum_tilt = sum_yaw = 0;
-            }
-        }
+        // IESKF 迭代观测更新
+        iteratedObserve(dt_sub);
 
         // 发布补偿后的 IMU 数据（IMU 系，已扣除零偏）
         geometry_msgs::msg::Vector3 acc_comp_msg, gyro_comp_msg;
@@ -734,6 +714,36 @@ namespace nav_data_handle {
         bg_msg.x = b_g_.x(); bg_msg.y = b_g_.y(); bg_msg.z = b_g_.z();
         bias_acc_pub_->publish(ba_msg);
         bias_gyro_pub_->publish(bg_msg);
+    }
+
+    // IESKF 迭代观测更新：复用 observeWheel/observeZeroTilt/constrainYawRate + injectAndReset
+    // x_iter 就是 q_/v_/p_/b_a_/b_g_ 自身，injectAndReset 直接修改它们
+    // 每轮：重置 P 和 δx → 观测函数在当前 x_iter 上重线性化 → inject 更新 x_iter
+    void NavDataHandle::iteratedObserve(double dt) {
+
+        P_prop_ = P_;
+
+        int actual_iters = 0;
+        for (int iter = 0; iter < iter_max_; iter ++) {
+            
+            actual_iters++;
+
+            // 重置 P 和 δx（避免上一轮 Joseph 更新导致 P 过度收缩）
+            P_ = P_prop_;
+            delta_x_.setZero();
+
+            // 观测函数用当前 q_/v_（x_iter）计算 H、h(x)，自然重线性化
+            observeWheel();
+            observeZeroTilt();
+            constrainYawRate(dt);
+
+            // injectAndReset 把 δx 注入到 q_/v_/b_a_/b_g_（即更新 x_iter），并清零 δx
+            Eigen::Matrix<double, 15, 1> dx = delta_x_;
+            injectAndReset();
+
+            // 收敛检查
+            if (dx.norm() < eps_dx_) break;
+        }
     }
 
     void NavDataHandle::publishOdometry(const rclcpp::Time &stamp) {

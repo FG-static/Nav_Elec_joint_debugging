@@ -44,6 +44,7 @@ namespace nav_data_handle {
         void observeZeroTilt();
         void constrainYawRate(double dt);  // 直线行驶时软约束 yaw rate ≈ 0，抗振动漂移
         void injectAndReset();
+        void iteratedObserve(double dt);   // IESKF 迭代观测更新（合并所有观测）
 
         // 接收 发布
         void publishOdometry(const rclcpp::Time &stamp);
@@ -74,6 +75,13 @@ namespace nav_data_handle {
 
         // IMU 外参预处理旋转矩阵（离线标定，IMU 系 → 车体系）
         Eigen::Matrix3d R_imu_to_body_;
+
+        // IESKF 迭代更新：保存 predict 后的名义状态/协方差
+        Eigen::Vector3d p_prop_, v_prop_, b_a_prop_, b_g_prop_;  // predict 后的名义状态
+        Eigen::Quaterniond q_prop_;                               // predict 后的四元数
+        Eigen::Matrix<double, 15, 15> P_prop_;                    // predict 后的协方差
+        int iter_max_ = 3;                                        // 最大迭代次数
+        double eps_dx_ = 1e-4;                                    // 收敛阈值（弧度）
 
         // 误差状态
         Eigen::Matrix<double, 15, 1> delta_x_; // 状态误差

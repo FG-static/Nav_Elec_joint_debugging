@@ -45,3 +45,7 @@ data_handle_node:
     # 值越小 -> 滤波越强，越平滑，滞后越大；值越大 -> 越贴近原始数据
     eskf.alpha_lowpass: 0.55       # 加速度计 + 轮速（重滤波，压制噪声）
     eskf.alpha_lowpass_gyro: 0.5   # 陀螺仪（适度响应，捕捉刹车反向脉冲，防止转弯过头）
+
+    # IESKF 迭代更新参数
+    eskf.iter_max: 5               # 最大迭代次数（通常 2~3 次收敛）
+    eskf.eps_dx: 0.0001            # 收敛阈值（弧度），||δx|| < eps 时停止迭代
