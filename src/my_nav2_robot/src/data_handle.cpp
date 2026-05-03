@@ -436,6 +436,23 @@ namespace nav_data_handle {
         return anti;
     }
 
+    // SO3 左雅可比（A_matrix），IESKF 核心
+    // A(v) = I + (1-cos||v||)/||v||² · [v]× + (||v||-sin||v||)/||v||³ · [v]×²
+    // 小角度（||v|| < 1e-6）时用泰勒展开避免除零：A ≈ I - ½[v]× + (1/6)[v]×²
+    Eigen::Matrix3d NavDataHandle::A_matrix(const Eigen::Vector3d &v) {
+
+        double nv = v.norm();
+        Eigen::Matrix3d vx = skew_symmetric(v);
+        if (nv < 1e-6) {
+            
+            return Eigen::Matrix3d::Identity() - 0.5 * vx + (1.0 / 6.0) * vx * vx;
+        }
+        double nv2 = nv * nv;
+        return Eigen::Matrix3d::Identity()
+               + (1.0 - std::cos(nv)) / nv2 * vx
+               + (nv - std::sin(nv)) / (nv2 * nv) * vx * vx;
+    }
+
     void NavDataHandle::predict(double dt) {
 
         // 补偿零偏（使用低通滤波后的数据），得到 IMU 系下的干净测量
@@ -464,15 +481,16 @@ namespace nav_data_handle {
             q_ = q_ * Eigen::Quaterniond(Eigen::AngleAxisd(dtheta.norm(), dtheta.normalized())); // 归一化
         }
 
-        // 协方差矩阵更新
+        // 协方差矩阵更新（IESKF：用 A_matrix 替代一阶近似）
         Eigen::Matrix<double, 15, 15> Fx = Eigen::Matrix<double, 15, 15>::Identity();
         Eigen::Matrix3d R = q_.toRotationMatrix();
-        
+        Eigen::Matrix3d A = A_matrix(dtheta);  // SO3 左雅可比，精确传递 δθ
+
         Fx.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity() * dt;
-        Fx.block<3, 3>(3, 6) = -R * skew_symmetric(acc) * dt;
-        Fx.block<3, 3>(3, 9) = -R * R_imu_to_body_ * dt;  // b_a_ 在原始 IMU 帧：∂δv/∂δb_a = -R*R_imu
-        Fx.block<3, 3>(6, 6) = Eigen::Matrix3d::Identity() - skew_symmetric(w * dt);
-        Fx.block<3, 3>(6, 12) = -R_imu_to_body_ * dt;     // b_g_ 在原始 IMU 帧：∂δθ/∂δb_g = -R_imu
+        Fx.block<3, 3>(3, 6) = -R * skew_symmetric(acc) * A * dt;   // A 修正 δθ 列
+        Fx.block<3, 3>(3, 9) = -R * R_imu_to_body_ * dt;            // b_a_ 在 IMU 帧，Euclidean 不变
+        Fx.block<3, 3>(6, 6) = A;                                     // A_matrix 替代 I - skew(w*dt)
+        Fx.block<3, 3>(6, 12) = -A * R_imu_to_body_ * dt;            // A 修正 δθ 行
 
         P_ = Fx * P_ * Fx.transpose() + Q_;
     }  
@@ -701,7 +719,6 @@ namespace nav_data_handle {
         v_ += delta_x_.segment<3>(3);
         b_a_ += delta_x_.segment<3>(9);
         b_g_ += delta_x_.segment<3>(12);
-        Eigen::Vector3d dtheta = delta_x_.segment<3>(6);
         if (dtheta.norm() > 1e-10) {
 
             Eigen::Quaterniond dq(Eigen::AngleAxisd(dtheta.norm(), dtheta.normalized()));

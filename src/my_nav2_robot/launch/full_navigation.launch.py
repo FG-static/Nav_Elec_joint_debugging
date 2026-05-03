@@ -107,7 +107,7 @@ def generate_launch_description():
         ),
         static_tf_node,
         nav2_launch,
-        #rviz_node,
+        rviz_node,
         node_robot_state_publisher,
         joint_state_publisher_node,
         data_handle_node

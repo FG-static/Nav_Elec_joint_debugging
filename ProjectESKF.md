@@ -556,3 +556,228 @@ $$\boldsymbol{a}_{clean}^{body} = \boldsymbol{R}_{imu}^{body} \cdot (\boldsymbol
 | Joseph 形式更新协方差 | 数值稳定，保证 $\boldsymbol{P}$ 对称正定 |
 | 用 MCU 时间戳 `t_ms` 算 dt | 比 ROS `now()` 更精确（无 USB 传输延迟抖动） |
 | 15 维状态向量 | IMU 姿态安装误差通过预处理旋转消除，不纳入 ESKF 状态 |
+
+---
+
+## 十二、IESKF 改进方案
+
+### 12.1 为什么从 ESKF 升级到 IESKF
+
+当前 ESKF 存在两个已验证的精度瓶颈：
+
+**问题一：v_anti 注入虚假 heading 修正**
+
+实测数据（nav_debug1）：
+- wheel 积分 = 352°，imu 积分 = 352°，但 odom = 428°（多 76°）
+- /odom_raw（无观测修正）= 345°（接近真值 360°）
+- δθ_z 来源分析：99.9% 来自 v_anti 的 yaw 列，每秒注入 ±1°~15°
+
+根因：当前 predict 的 Fx 对 δθ 使用一阶近似 $\boldsymbol{I} - [\boldsymbol{\omega}\Delta t]_\times$，在大角度时线性化误差大。v_anti 的 Jacobian 在错误的工作点上做线性化，导致 $\delta\boldsymbol{\theta}_z$ 的修正方向和大小都不准。
+
+**问题二：Q 矩阵统一导致 P(δθ) 过大**
+
+$\boldsymbol{Q}$ 对所有 15 个状态使用同一个 $Q_{init}=0.005$，但 $\delta\boldsymbol{\theta}$ 的真实过程噪声（IMU 积分精度）远小于此。结果 $P(\delta\boldsymbol{\theta})$ 保持高位 → v_anti 增益过大 → heading 被噪声随机游走。
+
+**IESKF 如何解决这两个问题**：
+
+1. **A_matrix 修正 Fx**：用 SO3 左雅可比精确替代一阶近似，线性化精度提升 → v_anti Jacobian 更准 → heading 修正更合理
+2. **迭代更新**：多次线性化收敛到最优解，消除单次线性化误差
+3. **流形上的协方差传播**：P 在 SO3 切空间中传播，物理意义更正确
+
+### 12.2 核心概念：SO3 流形与误差状态
+
+当前 ESKF 的姿态误差定义：
+
+$$\boldsymbol{q}_t = \boldsymbol{q} \otimes \delta\boldsymbol{q}, \quad \delta\boldsymbol{q} \approx \begin{bmatrix} \frac{1}{2}\delta\boldsymbol{\theta} \\ 1 \end{bmatrix}$$
+
+这是**欧氏空间的加法近似**——把 $\delta\boldsymbol{\theta}$ 当作 $\mathbb{R}^3$ 中的向量来加减。在小角度时足够精确，但角度增大后线性化误差显著。
+
+IESKF 使用**流形上的 boxplus/boxminus 运算**：
+
+**boxplus**（$\oplus$）：将误差向量注入流形上的点
+
+$$\boldsymbol{q} \oplus \delta\boldsymbol{\theta} = \boldsymbol{q} \otimes \exp(\delta\boldsymbol{\theta})$$
+
+其中 $\exp: \mathfrak{so}(3) \rightarrow SO(3)$ 是指数映射（Rodrigues 公式）：
+
+$$\exp(\boldsymbol{v}) = \cos\|\boldsymbol{v}\| \cdot \boldsymbol{I} + \frac{\sin\|\boldsymbol{v}\|}{\|\boldsymbol{v}\|} [\boldsymbol{v}]_\times + \frac{1 - \cos\|\boldsymbol{v}\|}{\|\boldsymbol{v}\|^2} \boldsymbol{v}\boldsymbol{v}^T$$
+
+**boxminus**（$\ominus$）：计算流形上两点之间的"距离"（误差向量）
+
+$$\boldsymbol{q}_a \ominus \boldsymbol{q}_b = \log(\boldsymbol{q}_b^{-1} \otimes \boldsymbol{q}_a)$$
+
+其中 $\log: SO(3) \rightarrow \mathfrak{so}(3)$ 是对数映射：
+
+$$\log(\boldsymbol{R}) = \frac{\theta}{2\sin\theta}(\boldsymbol{R} - \boldsymbol{R}^T), \quad \theta = \arccos\frac{\text{tr}(\boldsymbol{R}) - 1}{2}$$
+
+**含义**：boxplus/boxminus 确保误差状态始终在 SO3 的切空间（李代数 $\mathfrak{so}(3)$）中操作，而非在欧氏空间中近似。这是 IESKF 的数学基础。
+
+### 12.3 A_matrix：SO3 左雅可比
+
+**这是 IESKF 与标准 ESKF 的最关键区别。**
+
+标准 ESKF 在 predict 中计算 Fx 的姿态块：
+
+$$\boldsymbol{F}_{6:9, 6:9} = \boldsymbol{I} - [\boldsymbol{\omega}\Delta t]_\times$$
+
+这是 $\exp(\boldsymbol{\omega}\Delta t)$ 的一阶泰勒展开。当 $\|\boldsymbol{\omega}\Delta t\| = 0.1$ rad 时误差约 0.17%，但 $\|\boldsymbol{\omega}\Delta t\| = 0.5$ rad 时误差约 4.2%，$\|\boldsymbol{\omega}\Delta t\| = 1.0$ rad 时误差约 16%。
+
+IESKF 使用 **A_matrix**（SO3 的左雅可比）精确修正：
+
+$$\boldsymbol{A}(\boldsymbol{v}) = \boldsymbol{I} + \frac{1 - \cos\|\boldsymbol{v}\|}{\|\boldsymbol{v}\|^2} [\boldsymbol{v}]_\times + \frac{\|\boldsymbol{v}\| - \sin\|\boldsymbol{v}\|}{\|\boldsymbol{v}\|^3} [\boldsymbol{v}]_\times^2$$
+
+**物理含义**：A_matrix 是从李代数到李群的"转移算子"。当误差状态 $\delta\boldsymbol{\theta}$ 从当前切空间传递到下一个切空间时，A_matrix 补偿了流形曲率造成的非线性效应。
+
+**小角度近似**：
+
+$$\boldsymbol{A}(\boldsymbol{v}) \approx \boldsymbol{I} - \frac{1}{2}[\boldsymbol{v}]_\times + \frac{1}{6}[\boldsymbol{v}]_\times^2 + \cdots$$
+
+一阶近似 $\boldsymbol{I} - \frac{1}{2}[\boldsymbol{v}]_\times$ 就是当前 ESKF 用的（但系数是 $\frac{1}{2}$ 而非 1，这是关键差异）。
+
+**为什么当前 ESKF 用 $\boldsymbol{I} - [\boldsymbol{\omega}\Delta t]_\times$ 而 IESKF 用 $\boldsymbol{A}(\boldsymbol{\omega}\Delta t)$**：
+
+当前 ESKF 的 Fx 是从连续时间误差状态方程 $\delta\dot{\boldsymbol{\theta}} = -[\boldsymbol{\omega}_c]_\times \delta\boldsymbol{\theta}$ 离散化得到的，本质是 $\boldsymbol{I} + \boldsymbol{F}_{\theta\theta}\Delta t = \boldsymbol{I} - [\boldsymbol{\omega}_c\Delta t]_\times$。
+
+IESKF 认为这种离散化忽略了 SO3 的曲率。正确的离散化应该是：先计算 $\exp(\boldsymbol{\omega}_c\Delta t)$，再用 A_matrix 将切空间中的 Jacobian 映射回正确的切空间。
+
+### 12.4 predict 改造
+
+**当前 predict 代码**（`data_handle.cpp`）：
+
+```cpp
+Fx.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity() * dt;
+Fx.block<3, 3>(3, 6) = -R * skew_symmetric(acc) * dt;
+Fx.block<3, 3>(3, 9) = -R * dt;
+Fx.block<3, 3>(6, 6) = Eigen::Matrix3d::Identity() - skew_symmetric(w * dt);  // ← 一阶近似
+Fx.block<3, 3>(6, 12) = -Eigen::Matrix3d::Identity() * dt;
+```
+
+**IESKF predict 改造**：
+
+```cpp
+Eigen::Vector3d dtheta = w * dt;  // 角增量向量
+Eigen::Matrix3d A = A_matrix(dtheta);  // SO3 左雅可比（精确）
+
+Fx.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity() * dt;
+Fx.block<3, 3>(3, 6) = -R * skew_symmetric(acc) * A * dt;  // 速度对姿态误差
+Fx.block<3, 3>(3, 9) = -R * A * dt;                          // 速度对 b_a 误差
+Fx.block<3, 3>(6, 6) = A;                                     // ← A_matrix 替代一阶近似
+Fx.block<3, 3>(6, 12) = -A * dt;                              // 姿态对 b_g 误差
+```
+
+**各改动的物理意义**：
+
+| 行 | 当前 | IESKF | 原因 |
+|----|------|-------|------|
+| $\boldsymbol{F}_{\theta\theta}$ | $\boldsymbol{I} - [\boldsymbol{\omega}\Delta t]_\times$ | $\boldsymbol{A}(\boldsymbol{\omega}\Delta t)$ | 精确的 SO3 切空间传递，消除一阶截断误差 |
+| $\boldsymbol{F}_{v\theta}$ | $-\boldsymbol{R}[\boldsymbol{a}_c]_\times \Delta t$ | $-\boldsymbol{R}[\boldsymbol{a}_c]_\times \boldsymbol{A} \Delta t$ | A_matrix 修正速度对姿态误差的耦合 |
+| $\boldsymbol{F}_{vb_a}$ | $-\boldsymbol{R}\Delta t$ | $-\boldsymbol{R}\boldsymbol{A}\Delta t$ | A_matrix 修正速度对零偏的耦合 |
+| $\boldsymbol{F}_{\theta b_g}$ | $-\boldsymbol{I}\Delta t$ | $-\boldsymbol{A}\Delta t$ | A_matrix 修正姿态对零偏的耦合 |
+
+### 12.5 A_matrix 实现
+
+从 FAST-LIO 的 `mtkmath.hpp` 搬来，纯头文件无依赖：
+
+```cpp
+// SO3 左雅可比（A_matrix）
+// 输入：v ∈ R^3，旋转向量（弧度）
+// 输出：3×3 矩阵 A(v)
+// 公式：A(v) = I + (1-cos||v||)/||v||^2 * [v]x + (||v||-sin||v||)/||v||^3 * [v]x^2
+// 小角度近似：A(v) ≈ I - 0.5*[v]x
+static Eigen::Matrix3d A_matrix(const Eigen::Vector3d &v) {
+    double nv = v.norm();
+    if (nv < 1e-10) {
+        // 小角度：用泰勒展开避免除零
+        // A(v) ≈ I - 0.5*[v]x + (1/6)*[v]x^2
+        Eigen::Matrix3d vx = skew_symmetric(v);
+        return Eigen::Matrix3d::Identity() - 0.5 * vx + (1.0/6.0) * vx * vx;
+    }
+    Eigen::Matrix3d vx = skew_symmetric(v);
+    double nv2 = nv * nv;
+    return Eigen::Matrix3d::Identity()
+           + (1.0 - std::cos(nv)) / nv2 * vx
+           + (nv - std::sin(nv)) / (nv2 * nv) * vx * vx;
+}
+```
+
+### 12.6 迭代观测更新
+
+**当前 ESKF 的更新流程**：
+
+```
+observeWheel()    → δx += K·(y - h), P 更新
+observeZeroTilt() → δx += K·(y - h), P 更新
+injectAndReset()  → x = x ⊕ δx, δx = 0
+```
+
+问题：两个观测是**串行单次**执行的。每次观测更新后，名义状态未变（要等 inject 才变），导致第二次观测的 H 矩阵在过时的工作点上计算。
+
+**IESKF 迭代更新**：
+
+```
+循环直到收敛（||dx_|| < ε）：
+  1. 计算误差：δθ = log(R_prop^{-1} · R_current)
+  2. 旋转到切空间：P ← A(δθ)^T · P · A(δθ)
+  3. 合并所有观测：H = [H_wheel; H_tilt], y = [y_wheel; y_tilt]
+  4. 标准 KF 更新：K, innovation, dx_
+  5. 注入：x ← x ⊕ dx_
+  6. 检查收敛
+```
+
+**为什么迭代能提升精度**：
+
+每次注入后名义状态更新，H 矩阵在新的工作点重新计算。对于轮速观测中的 v_anti（$[\boldsymbol{v}_{body}]_\times$），$\boldsymbol{v}_{body} = \boldsymbol{R}^T\boldsymbol{v}$ 依赖当前姿态 $\boldsymbol{R}$。迭代保证 H 在正确的 $\boldsymbol{R}$ 上计算，消除了单次更新的线性化误差。
+
+**迭代更新的关键公式**（来自 FAST-LIO `esekfom.hpp`）：
+
+$$\delta\boldsymbol{x}_{new} = \boldsymbol{K}\boldsymbol{h} + (\boldsymbol{K}\boldsymbol{H} - \boldsymbol{I})\delta\boldsymbol{x}_{current}$$
+
+其中 $\delta\boldsymbol{x}_{current}$ 是当前迭代的误差状态估计，$\boldsymbol{K}\boldsymbol{h}$ 是标准卡尔曼修正项，$(\boldsymbol{K}\boldsymbol{H} - \boldsymbol{I})\delta\boldsymbol{x}_{current}$ 是对上一次迭代估计的修正。这两项叠加后注入名义状态，实现"逐步逼近最优解"。
+
+### 12.7 协方差在切空间中的传播
+
+当前 ESKF 的 P 矩阵在 inject 后保持不变（$\delta\boldsymbol{x}$ 清零但 P 不变）。这在数学上不严格——P 描述的是 $\delta\boldsymbol{\theta}$ 的不确定性，但 $\delta\boldsymbol{\theta}$ 的"零点"在注入后变了。
+
+IESKF 在注入后用 A_matrix 旋转 P：
+
+$$\boldsymbol{P}_{new} = \boldsymbol{A}(\delta\boldsymbol{\theta}_{inject})^T \cdot \boldsymbol{P}_{old} \cdot \boldsymbol{A}(\delta\boldsymbol{\theta}_{inject})$$
+
+**物理含义**：注入改变了名义姿态，切空间也随之旋转。A_matrix 将 P 从旧切空间旋转到新切空间，确保协方差的几何意义正确。
+
+这对 $\delta\boldsymbol{\theta}_z$ 的抑制效果：由于 A_matrix 是精确的旋转，P(δθ) 不会因注入操作而人为膨胀，从根本上压制了 v_anti 的随机游走。
+
+### 12.8 可选改进：S2 流形重力估计
+
+当前 ESKF 用 observeZeroTilt 硬约束 pitch=0, roll=0。IESKF 可将重力方向作为 S2（单位球面）状态估计：
+
+$$\boldsymbol{g} = \|\boldsymbol{g}\| \cdot \hat{\boldsymbol{g}}, \quad \hat{\boldsymbol{g}} \in S^2$$
+
+S2 流形的误差状态是 2 维（球面切空间），用 Bx 基矩阵参数化：
+
+$$\hat{\boldsymbol{g}} \oplus \delta\boldsymbol{\xi} = \exp(\boldsymbol{B}_x \delta\boldsymbol{\xi}) \cdot \hat{\boldsymbol{g}}, \quad \delta\boldsymbol{\xi} \in \mathbb{R}^2$$
+
+**对本项目的适用性**：地面机器人在平地上运动，重力方向近似恒定 $[0, 0, -9.8]^T$。硬约束 pitch=0, roll=0 更直接有效，**建议保留当前的 observeZeroTilt 方案，不改 S2 流形**。
+
+### 12.9 改造总结
+
+| 改动项 | 当前代码 | IESKF 版本 | 收益 | 必要性 |
+|--------|---------|-----------|------|--------|
+| Fx 姿态块 | $\boldsymbol{I} - [\boldsymbol{\omega}\Delta t]_\times$ | $\boldsymbol{A}(\boldsymbol{\omega}\Delta t)$ | 消除一阶截断误差，大角度精度提升 | **必做** |
+| Fx 速度-姿态耦合 | $-\boldsymbol{R}[\boldsymbol{a}_c]_\times\Delta t$ | $-\boldsymbol{R}[\boldsymbol{a}_c]_\times\boldsymbol{A}\Delta t$ | Jacobian 更精确 | **必做** |
+| Fx 速度-零偏耦合 | $-\boldsymbol{R}\Delta t$ | $-\boldsymbol{R}\boldsymbol{A}\Delta t$ | Jacobian 更精确 | **必做** |
+| Fx 姿态-零偏耦合 | $-\boldsymbol{I}\Delta t$ | $-\boldsymbol{A}\Delta t$ | Jacobian 更精确 | **必做** |
+| 观测更新 | 单次串行 | 迭代合并 | 消除 H 矩阵工作点误差 | 推荐 |
+| inject 后 P 旋转 | 无 | $\boldsymbol{A}(\delta\boldsymbol{\theta})^T \boldsymbol{P} \boldsymbol{A}(\delta\boldsymbol{\theta})$ | P 几何意义正确，抑制随机游走 | 推荐 |
+| boxplus/boxminus | 手动四元数乘法 | 流形运算 | 代码清晰，大角度安全 | 推荐 |
+| S2 重力估计 | observeZeroTilt 硬约束 | S2 流形估计 | 不依赖地面水平假设 | 可选（本项目不需要） |
+
+### 12.10 预期效果
+
+以实测数据量化：
+
+| 指标 | 当前 ESKF | 预期 IESKF | 理论依据 |
+|------|-----------|-----------|---------|
+| nav_debug1 odom 误差 | 76° / 40s | <15° / 40s | A_matrix 消除 Fx 线性化误差 |
+| nav_debug2 odom 误差 | 227° / 42s | <25° / 42s | 迭代更新 + P 切空间旋转 |
+| 转弯过头 | +16°~22° | <5° | v_anti Jacobian 精度提升 |
+| 直走漂移率 | 1.6°/s | <0.5°/s | P(δθ) 不再人为膨胀 |

@@ -33,6 +33,7 @@ namespace nav_data_handle {
         int test; // 通信测试
 
         Eigen::Matrix3d skew_symmetric(const Eigen::Vector3d vec);
+        Eigen::Matrix3d A_matrix(const Eigen::Vector3d &v);  // SO3 左雅可比（IESKF）
 
         // 回调函数
         void gimbalCallBack(const rm_interfaces::msg::Gimbal::SharedPtr msg);
