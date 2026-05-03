@@ -725,7 +725,7 @@ namespace nav_data_handle {
 
         int actual_iters = 0;
         for (int iter = 0; iter < iter_max_; iter ++) {
-            
+
             actual_iters++;
 
             // 重置 P 和 δx（避免上一轮 Joseph 更新导致 P 过度收缩）
@@ -743,6 +743,22 @@ namespace nav_data_handle {
 
             // 收敛检查
             if (dx.norm() < eps_dx_) break;
+        }
+
+        // inject 后旋转 P 到新切空间（消除切空间错位的协方差几何误差）
+        Eigen::Quaterniond qe = q_prop_.conjugate() * q_;
+        if (qe.w() < 0.0) qe.coeffs() = -qe.coeffs();
+        Eigen::Vector3d qev(qe.x(), qe.y(), qe.z());
+        double ne = qev.norm();
+        Eigen::Vector3d dte;
+        if (ne < 1e-10) dte = 2.0 * qev;
+        else dte = 2.0 * std::atan2(ne, qe.w()) / ne * qev;
+        if (std::isfinite(dte.norm())) {
+        
+            Eigen::Matrix3d Ae = A_matrix(dte);
+            Eigen::Matrix<double, 15, 15> Af = Eigen::Matrix<double, 15, 15>::Identity();
+            Af.block<3, 3>(6, 6) = Ae;
+            P_ = Af.transpose() * P_ * Af;
         }
     }
 
