@@ -746,6 +746,7 @@ namespace nav_data_handle {
         }
 
         // inject 后旋转 P 到新切空间（消除切空间错位的协方差几何误差）
+        // 否则协方差会逐渐偏离真实切空间（因为每次inject后，实际位置是在流形上移动的，两个位点的切空间显然不一样）
         Eigen::Quaterniond qe = q_prop_.conjugate() * q_;
         if (qe.w() < 0.0) qe.coeffs() = -qe.coeffs();
         Eigen::Vector3d qev(qe.x(), qe.y(), qe.z());
@@ -754,7 +755,7 @@ namespace nav_data_handle {
         if (ne < 1e-10) dte = 2.0 * qev;
         else dte = 2.0 * std::atan2(ne, qe.w()) / ne * qev;
         if (std::isfinite(dte.norm())) {
-        
+
             Eigen::Matrix3d Ae = A_matrix(dte);
             Eigen::Matrix<double, 15, 15> Af = Eigen::Matrix<double, 15, 15>::Identity();
             Af.block<3, 3>(6, 6) = Ae;
