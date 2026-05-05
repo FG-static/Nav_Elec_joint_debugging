@@ -2,7 +2,7 @@
 
 namespace nav_data_handle {
 
-    NavDataHandle::NavDataHandle() : rclcpp::Node("DataHandleNode"){
+    NavDataHandle::NavDataHandle() : rclcpp::Node("DataHandleNode") {
 
         gimbal_sub_ = this->create_subscription<rm_interfaces::msg::Gimbal>(
             "/tracker/gimbal", rclcpp::SensorDataQoS(),
@@ -77,11 +77,12 @@ namespace nav_data_handle {
         RCLCPP_INFO(this->get_logger(), "ESKF Data Handle Node Initialized");
     }
 
-    void NavDataHandle::loadESKFParams()
-    {
+    void NavDataHandle::loadESKFParams() {
+
         // 声明
         this->declare_parameter("eskf.P_init", 0.01);
         this->declare_parameter("eskf.Q_init", 0.005);
+        this->declare_parameter("eskf.q_pose", 0.005);
         this->declare_parameter("eskf.q_theta", 0.0001);
         this->declare_parameter("eskf.q_b_a", 0.001);
         this->declare_parameter("eskf.q_b_g", 0.001);
@@ -102,6 +103,7 @@ namespace nav_data_handle {
         // 读取
         double P_init     = this->get_parameter("eskf.P_init").as_double();
         double Q_init     = this->get_parameter("eskf.Q_init").as_double();
+        double q_pose     = this->get_parameter("eskf.q_pose").as_double();
         double q_theta    = this->get_parameter("eskf.q_theta").as_double();
         double q_b_a      = this->get_parameter("eskf.q_b_a").as_double();
         double q_b_g      = this->get_parameter("eskf.q_b_g").as_double();
@@ -149,6 +151,8 @@ namespace nav_data_handle {
 
         P_      = Eigen::Matrix<double, 15, 15>::Identity() * P_init;
         Q_      = Eigen::Matrix<double, 15, 15>::Identity() * Q_init;
+        // 位置部分独立噪声（δp: 0-2）
+        Q_.block<3, 3>(0,  0) = Eigen::Matrix3d::Identity() * q_pose;
         // δθ 部分独立噪声（6-8），压制 v_anti heading 随机游走
         Q_.block<3, 3>(6,  6) = Eigen::Matrix3d::Identity() * q_theta;
         // 零偏部分使用独立噪声量（b_a: 9-11, b_g: 12-14）
@@ -382,9 +386,7 @@ namespace nav_data_handle {
         int n_steps = std::max(1, static_cast<int>(std::ceil(dt / DT_MAX)));
         double dt_sub = dt / n_steps;
         last_dt_ = dt_sub;  // 供 injectAndReset 反算融合 wz
-        for (int i = 0; i < n_steps; i++) {
-            predict(dt_sub);
-        }
+        for (int i = 0; i < n_steps; i ++) predict(dt_sub);
         // IESKF 迭代观测更新
         iteratedObserve(dt_sub);
 
@@ -475,8 +477,8 @@ namespace nav_data_handle {
         P_ = Fx * P_ * Fx.transpose() + Q_;
     }  
 
-    void NavDataHandle::observeWheel()
-    {
+    void NavDataHandle::observeWheel() {
+
         // 解算底盘速度（使用低通滤波后的轮速数据）
         Eigen::Vector<double, 4> wheel_v = wheel_filtered_;
         // 全向轮运动学（正交布局，辊子与底盘xy轴呈45°）：
@@ -590,8 +592,8 @@ namespace nav_data_handle {
         wz_pub_->publish(wz_msg);
     }
 
-    void NavDataHandle::observeZeroTilt()
-    {
+    void NavDataHandle::observeZeroTilt() {
+
         // 地面机器人约束：pitch ≈ 0, roll ≈ 0
         // 从当前四元数提取 pitch 和 roll 作为 "观测值"，
         // 目标值是 0，通过 ESKF 观测更新将角度拉回水平面。
@@ -641,8 +643,8 @@ namespace nav_data_handle {
              Kk * R_tilt_ * Kk.transpose();
     }
 
-    void NavDataHandle::constrainYawRate(double dt)
-    {
+    void NavDataHandle::constrainYawRate(double dt) {
+
         // 直线行驶时软约束：yaw rate ≈ 0
         // 当陀螺仪和轮速一致认为 |wz| 很小时，将当前帧的航向变化约束为零，
         // 抑制电机振动导致的 wz 震荡积分漂移
@@ -735,7 +737,7 @@ namespace nav_data_handle {
             // 观测函数用当前 q_/v_（x_iter）计算 H、h(x)，自然重线性化
             observeWheel();
             observeZeroTilt();
-            constrainYawRate(dt);
+            // constrainYawRate(dt);
 
             // injectAndReset 把 δx 注入到 q_/v_/b_a_/b_g_（即更新 x_iter），并清零 δx
             Eigen::Matrix<double, 15, 1> dx = delta_x_;
