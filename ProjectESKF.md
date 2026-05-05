@@ -203,33 +203,168 @@ $$\Delta\boldsymbol{q} = \begin{bmatrix} \sin(\frac{\|\Delta\boldsymbol{\theta}\
 
 $$\delta\dot{\boldsymbol{x}} = \boldsymbol{F} \delta\boldsymbol{x} + \boldsymbol{G}\boldsymbol{w}$$
 
-其中系统矩阵 $\boldsymbol{F} \in \mathbb{R}^{15 \times 15}$：
+其中 $\boldsymbol{F} = \frac{\partial \delta\dot{\boldsymbol{x}}}{\partial \delta\boldsymbol{x}}$，$\boldsymbol{G} = \frac{\partial \delta\dot{\boldsymbol{x}}}{\partial \boldsymbol{w}}$。下面逐行推导各分块。
 
-$$\boldsymbol{F} = \begin{bmatrix} \boldsymbol{0} & \boldsymbol{I} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} \\ \boldsymbol{0} & \boldsymbol{0} & -\boldsymbol{R}[\boldsymbol{a}_c]_\times & -\boldsymbol{R} & \boldsymbol{0} \\ \boldsymbol{0} & \boldsymbol{0} & -[\boldsymbol{\omega}_c]_\times & \boldsymbol{0} & -\boldsymbol{I} \\ \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} \\ \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} \end{bmatrix}$$
+---
 
-其中 $\boldsymbol{a}_c = \boldsymbol{a}_{clean}^{body}$，$\boldsymbol{\omega}_c = \boldsymbol{\omega}_{clean}^{body}$。
+#### 第 1 行：位置误差 $\delta\dot{\boldsymbol{p}}$
 
-**各分块的物理意义推导**：
+**名义方程**：$\dot{\boldsymbol{p}} = \boldsymbol{v}$
 
-#### $\delta\dot{\boldsymbol{v}}$ 对 $\delta\boldsymbol{\theta}$ 的偏导：$\boldsymbol{F}_{\boldsymbol{v}\boldsymbol{\theta}}$
+**真实方程**：$\dot{\boldsymbol{p}}_t = \boldsymbol{v}_t = (\boldsymbol{v} + \delta\boldsymbol{v})$
 
-速度传播方程：$\dot{\boldsymbol{v}} = \boldsymbol{R}(\boldsymbol{q})\boldsymbol{a}_c + \boldsymbol{g}$
+**误差方程**：
 
-当姿态有扰动 $\delta\boldsymbol{\theta}$（车体系，右乘）时：
+$$\delta\dot{\boldsymbol{p}} = \dot{\boldsymbol{p}}_t - \dot{\boldsymbol{p}} = \delta\boldsymbol{v}$$
 
-$$\boldsymbol{R}_t = \boldsymbol{R}(\boldsymbol{I} - [\delta\boldsymbol{\theta}]_\times)$$
+**对各误差状态偏导**：
 
-$$\delta\dot{\boldsymbol{v}} = -\boldsymbol{R}[\delta\boldsymbol{\theta}]_\times \boldsymbol{a}_c = -\boldsymbol{R}[\boldsymbol{a}_c]_\times \delta\boldsymbol{\theta}$$
+| 偏导 | 结果 | 物理含义 |
+|------|------|---------|
+| $\frac{\partial \delta\dot{\boldsymbol{p}}}{\partial \delta\boldsymbol{p}}$ | $\boldsymbol{0}$ | 位置误差不自我增长 |
+| $\frac{\partial \delta\dot{\boldsymbol{p}}}{\partial \delta\boldsymbol{v}}$ | $\boldsymbol{I}$ | 速度误差直接积分进位置误差 |
+| $\frac{\partial \delta\dot{\boldsymbol{p}}}{\partial \delta\boldsymbol{\theta}}$ | $\boldsymbol{0}$ | 位置变化率不依赖姿态误差 |
+| $\frac{\partial \delta\dot{\boldsymbol{p}}}{\partial \delta\boldsymbol{b}_a}$ | $\boldsymbol{0}$ | 位置变化率不依赖加计零偏 |
+| $\frac{\partial \delta\dot{\boldsymbol{p}}}{\partial \delta\boldsymbol{b}_g}$ | $\boldsymbol{0}$ | 位置变化率不依赖陀螺零偏 |
 
-$$\boxed{\boldsymbol{F}_{\boldsymbol{v}\boldsymbol{\theta}} = -\boldsymbol{R}[\boldsymbol{a}_c]_\times}$$
+$$\boxed{\delta\dot{\boldsymbol{p}} = \delta\boldsymbol{v} \implies \boldsymbol{F}_{\boldsymbol{pp}} = \boldsymbol{0},\; \boldsymbol{F}_{\boldsymbol{pv}} = \boldsymbol{I},\; \boldsymbol{F}_{\boldsymbol{p\theta}} = \boldsymbol{0},\; \boldsymbol{F}_{\boldsymbol{pb}_a} = \boldsymbol{0},\; \boldsymbol{F}_{\boldsymbol{pb}_g} = \boldsymbol{0}}$$
 
-#### $\delta\dot{\boldsymbol{v}}$ 对 $\delta\boldsymbol{b}_a$ 的偏导：$-\boldsymbol{R}$
+---
 
-$$\delta\dot{\boldsymbol{v}} = -\boldsymbol{R}\delta\boldsymbol{b}_a$$
+#### 第 2 行：速度误差 $\delta\dot{\boldsymbol{v}}$
 
-#### $\delta\dot{\boldsymbol{\theta}}$ 对 $\delta\boldsymbol{\theta}$ 和 $\delta\boldsymbol{b}_g$ 的偏导
+**名义方程**：$\dot{\boldsymbol{v}} = \boldsymbol{R}\boldsymbol{a}_c + \boldsymbol{g}$
 
-$$\frac{\partial \delta\dot{\boldsymbol{\theta}}}{\partial \delta\boldsymbol{\theta}} = -[\boldsymbol{\omega}_c]_\times, \quad \frac{\partial \delta\dot{\boldsymbol{\theta}}}{\partial \delta\boldsymbol{b}_g} = -\boldsymbol{I}$$
+其中 $\boldsymbol{a}_c = \boldsymbol{a}_{clean}^{body}$ 是补偿零偏后的车体系加速度。
+
+**真实方程**：真实加速度计测量包含零偏误差 $\delta\boldsymbol{b}_a$ 和白噪声 $\boldsymbol{n}_a$：
+
+$$\dot{\boldsymbol{v}}_t = \boldsymbol{R}_t(\boldsymbol{a}_c - \delta\boldsymbol{b}_a - \boldsymbol{n}_a) + \boldsymbol{g}$$
+
+**误差推导——姿态扰动的影响**：
+
+真实旋转矩阵受姿态误差 $\delta\boldsymbol{\theta}$（右乘，车体系定义）扰动：
+
+$$\boldsymbol{R}_t = \boldsymbol{R}(\boldsymbol{I} - [\delta\boldsymbol{\theta}]_\times) + O(\|\delta\boldsymbol{\theta}\|^2)$$
+
+代入速度方程，保留一阶项：
+
+$$\dot{\boldsymbol{v}}_t = \boldsymbol{R}(\boldsymbol{I} - [\delta\boldsymbol{\theta}]_\times)(\boldsymbol{a}_c - \delta\boldsymbol{b}_a - \boldsymbol{n}_a) + \boldsymbol{g}$$
+
+展开，忽略二阶小量 $\delta\boldsymbol{\theta} \cdot \delta\boldsymbol{b}_a$ 等：
+
+$$\dot{\boldsymbol{v}}_t = \boldsymbol{R}\boldsymbol{a}_c + \boldsymbol{g} - \boldsymbol{R}[\delta\boldsymbol{\theta}]_\times\boldsymbol{a}_c - \boldsymbol{R}\delta\boldsymbol{b}_a - \boldsymbol{R}\boldsymbol{n}_a$$
+
+因此误差方程为：
+
+$$\delta\dot{\boldsymbol{v}} = \dot{\boldsymbol{v}}_t - \dot{\boldsymbol{v}} = -\boldsymbol{R}[\delta\boldsymbol{\theta}]_\times\boldsymbol{a}_c - \boldsymbol{R}\delta\boldsymbol{b}_a - \boldsymbol{R}\boldsymbol{n}_a$$
+
+**利用反对称矩阵性质化简**：$[\delta\boldsymbol{\theta}]_\times\boldsymbol{a}_c = -[\boldsymbol{a}_c]_\times\delta\boldsymbol{\theta}$
+
+$$\delta\dot{\boldsymbol{v}} = -\boldsymbol{R}[\boldsymbol{a}_c]_\times\delta\boldsymbol{\theta} - \boldsymbol{R}\delta\boldsymbol{b}_a - \boldsymbol{R}\boldsymbol{n}_a$$
+
+**对各误差状态偏导**：
+
+| 偏导 | 结果 | 物理含义 |
+|------|------|---------|
+| $\frac{\partial \delta\dot{\boldsymbol{v}}}{\partial \delta\boldsymbol{p}}$ | $\boldsymbol{0}$ | 速度变化率不依赖位置误差 |
+| $\frac{\partial \delta\dot{\boldsymbol{v}}}{\partial \delta\boldsymbol{v}}$ | $\boldsymbol{0}$ | 速度误差不自我增长（无阻尼） |
+| $\frac{\partial \delta\dot{\boldsymbol{v}}}{\partial \delta\boldsymbol{\theta}}$ | $-\boldsymbol{R}[\boldsymbol{a}_c]_\times$ | 姿态误差导致加速度投影方向偏移，$\|\boldsymbol{a}_c\|$ 越大耦合越强 |
+| $\frac{\partial \delta\dot{\boldsymbol{v}}}{\partial \delta\boldsymbol{b}_a}$ | $-\boldsymbol{R}$ | 加计零偏误差经旋转矩阵投影到世界系 |
+| $\frac{\partial \delta\dot{\boldsymbol{v}}}{\partial \delta\boldsymbol{b}_g}$ | $\boldsymbol{0}$ | 陀螺零偏不直接影响速度（仅通过姿态间接影响） |
+
+**噪声驱动**：$\boldsymbol{G}_{\boldsymbol{v}\boldsymbol{n}_a} = -\boldsymbol{R}$，即加速度计白噪声经旋转投影到世界系驱动速度误差。
+
+$$\boxed{\delta\dot{\boldsymbol{v}} = -\boldsymbol{R}[\boldsymbol{a}_c]_\times\delta\boldsymbol{\theta} - \boldsymbol{R}\delta\boldsymbol{b}_a - \boldsymbol{R}\boldsymbol{n}_a}$$
+
+---
+
+#### 第 3 行：姿态误差 $\delta\dot{\boldsymbol{\theta}}$
+
+**名义方程**：$\dot{\boldsymbol{q}} = \frac{1}{2}\boldsymbol{q} \otimes \boldsymbol{\omega}_c$
+
+其中 $\boldsymbol{\omega}_c = \boldsymbol{\omega}_{clean}^{body}$ 是补偿零偏后的车体系角速度。
+
+**真实方程**：真实陀螺仪测量包含零偏误差 $\delta\boldsymbol{b}_g$ 和白噪声 $\boldsymbol{n}_g$：
+
+$$\dot{\boldsymbol{q}}_t = \frac{1}{2}\boldsymbol{q}_t \otimes (\boldsymbol{\omega}_c - \delta\boldsymbol{b}_g - \boldsymbol{n}_g)$$
+
+**误差推导**：
+
+姿态误差定义为右乘扰动：$\boldsymbol{q}_t = \boldsymbol{q} \otimes \delta\boldsymbol{q}$，其中 $\delta\boldsymbol{q} \approx [\frac{1}{2}\delta\boldsymbol{\theta}, 1]^T$。
+
+对时间求导：
+
+$$\dot{\boldsymbol{q}}_t = \dot{\boldsymbol{q}} \otimes \delta\boldsymbol{q} + \boldsymbol{q} \otimes \delta\dot{\boldsymbol{q}}$$
+
+将 $\dot{\boldsymbol{q}}_t$ 和 $\dot{\boldsymbol{q}}$ 的表达式代入，整理可得：
+
+$$\delta\dot{\boldsymbol{\theta}} = -[\boldsymbol{\omega}_c]_\times\delta\boldsymbol{\theta} - \delta\boldsymbol{b}_g - \boldsymbol{n}_g$$
+
+**关键步骤**：从四元数导数到旋转向量导数的推导利用了小角度近似和李括号性质：
+
+$$[\delta\boldsymbol{\theta}]_\times\boldsymbol{\omega}_c - [\boldsymbol{\omega}_c]_\times\delta\boldsymbol{\theta} = [\delta\boldsymbol{\theta} \times \boldsymbol{\omega}_c]_\times = -[\boldsymbol{\omega}_c]_\times\delta\boldsymbol{\theta} + [\delta\boldsymbol{\theta}]_\times\boldsymbol{\omega}_c$$
+
+在右乘扰动定义下，合并后得到 $-[\boldsymbol{\omega}_c]_\times\delta\boldsymbol{\theta}$ 项。
+
+**对各误差状态偏导**：
+
+| 偏导 | 结果 | 物理含义 |
+|------|------|---------|
+| $\frac{\partial \delta\dot{\boldsymbol{\theta}}}{\partial \delta\boldsymbol{p}}$ | $\boldsymbol{0}$ | 姿态变化率不依赖位置误差 |
+| $\frac{\partial \delta\dot{\boldsymbol{\theta}}}{\partial \delta\boldsymbol{v}}$ | $\boldsymbol{0}$ | 姿态变化率不依赖速度误差 |
+| $\frac{\partial \delta\dot{\boldsymbol{\theta}}}{\partial \delta\boldsymbol{\theta}}$ | $-[\boldsymbol{\omega}_c]_\times$ | 姿态误差受角速度叉乘旋转，反映 SO3 流形曲率 |
+| $\frac{\partial \delta\dot{\boldsymbol{\theta}}}{\partial \delta\boldsymbol{b}_a}$ | $\boldsymbol{0}$ | 加计零偏不影响角速度 |
+| $\frac{\partial \delta\dot{\boldsymbol{\theta}}}{\partial \delta\boldsymbol{b}_g}$ | $-\boldsymbol{I}$ | 陀螺零偏误差 1:1 注入姿态误差 |
+
+**噪声驱动**：$\boldsymbol{G}_{\boldsymbol{\theta}\boldsymbol{n}_g} = -\boldsymbol{I}$，即陀螺仪白噪声直接驱动姿态误差。
+
+$$\boxed{\delta\dot{\boldsymbol{\theta}} = -[\boldsymbol{\omega}_c]_\times\delta\boldsymbol{\theta} - \delta\boldsymbol{b}_g - \boldsymbol{n}_g}$$
+
+---
+
+#### 第 4、5 行：零偏误差 $\delta\dot{\boldsymbol{b}}_a$, $\delta\dot{\boldsymbol{b}}_g$
+
+**建模假设**：零偏为慢时变常量，其变化用随机游走描述：
+
+$$\dot{\boldsymbol{b}}_a = \boldsymbol{n}_{ba}, \quad \dot{\boldsymbol{b}}_g = \boldsymbol{n}_{bg}$$
+
+**误差方程**：
+
+$$\delta\dot{\boldsymbol{b}}_a = \boldsymbol{n}_{ba}, \quad \delta\dot{\boldsymbol{b}}_g = \boldsymbol{n}_{bg}$$
+
+所有偏导为零，噪声直接驱动。物理含义：零偏误差没有自愈机制，只能靠观测更新修正。
+
+$$\boxed{\boldsymbol{F}_{\boldsymbol{b}_a\boldsymbol{*}} = \boldsymbol{0},\; \boldsymbol{G}_{\boldsymbol{b}_a\boldsymbol{n}_{ba}} = \boldsymbol{I},\; \boldsymbol{F}_{\boldsymbol{b}_g\boldsymbol{*}} = \boldsymbol{0},\; \boldsymbol{G}_{\boldsymbol{b}_g\boldsymbol{n}_{bg}} = \boldsymbol{I}}$$
+
+---
+
+#### 汇总：F 矩阵与 G 矩阵
+
+将以上各行偏导组合，得到：
+
+$$\boldsymbol{F} = \frac{\partial \delta\dot{\boldsymbol{x}}}{\partial \delta\boldsymbol{x}} = \begin{bmatrix} \boldsymbol{0} & \boldsymbol{I} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} \\ \boldsymbol{0} & \boldsymbol{0} & -\boldsymbol{R}[\boldsymbol{a}_c]_\times & -\boldsymbol{R} & \boldsymbol{0} \\ \boldsymbol{0} & \boldsymbol{0} & -[\boldsymbol{\omega}_c]_\times & \boldsymbol{0} & -\boldsymbol{I} \\ \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} \\ \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} \end{bmatrix}$$
+
+$$\boldsymbol{G} = \frac{\partial \delta\dot{\boldsymbol{x}}}{\partial \boldsymbol{w}} = \begin{bmatrix} \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} \\ \boldsymbol{0} & -\boldsymbol{R} & \boldsymbol{0} & \boldsymbol{0} \\ -\boldsymbol{I} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} \\ \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{I} & \boldsymbol{0} \\ \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{0} & \boldsymbol{I} \end{bmatrix}$$
+
+噪声向量 $\boldsymbol{w} = [\boldsymbol{n}_g;\, \boldsymbol{n}_a;\, \boldsymbol{n}_{ba};\, \boldsymbol{n}_{bg}] \in \mathbb{R}^{12}$。
+
+| 噪声分量 | 维度 | 物理含义 | 驱动路径 |
+|----------|------|---------|---------|
+| $\boldsymbol{n}_g$ | 3 | 陀螺仪白噪声 | $\delta\dot{\boldsymbol{\theta}} \leftarrow -\boldsymbol{n}_g$ |
+| $\boldsymbol{n}_a$ | 3 | 加速度计白噪声 | $\delta\dot{\boldsymbol{v}} \leftarrow -\boldsymbol{R}\boldsymbol{n}_a$ |
+| $\boldsymbol{n}_{ba}$ | 3 | 加计零偏随机游走 | $\delta\dot{\boldsymbol{b}}_a \leftarrow \boldsymbol{n}_{ba}$ |
+| $\boldsymbol{n}_{bg}$ | 3 | 陀螺零偏随机游走 | $\delta\dot{\boldsymbol{b}}_g \leftarrow \boldsymbol{n}_{bg}$ |
+
+连续时间噪声谱密度矩阵 $\boldsymbol{Q}_c \in \mathbb{R}^{12 \times 12}$：
+
+$$\boldsymbol{Q}_c = \begin{bmatrix} \sigma_g^2\boldsymbol{I} & & & \\ & \sigma_a^2\boldsymbol{I} & & \\ & & \sigma_{ba}^2\boldsymbol{I} & \\ & & & \sigma_{bg}^2\boldsymbol{I} \end{bmatrix}$$
+
+离散化过程噪声矩阵（一阶近似）：
+
+$$\boldsymbol{Q}_d \approx \boldsymbol{G}\boldsymbol{Q}_c\boldsymbol{G}^T\Delta t = \begin{bmatrix} \boldsymbol{0} & & & & \\ & \boldsymbol{R}\sigma_a^2\boldsymbol{I}\boldsymbol{R}^T\Delta t & & & \\ & & \sigma_g^2\boldsymbol{I}\Delta t & & \\ & & & \sigma_{ba}^2\boldsymbol{I}\Delta t & \\ & & & & \sigma_{bg}^2\boldsymbol{I}\Delta t \end{bmatrix}$$
+
+> **注意**：当前代码实现中 `Q_` 为 15×15 对角阵（`Identity * 0.005`），是 $\boldsymbol{Q}_d$ 的简化近似，未严格按 $\boldsymbol{G}\boldsymbol{Q}_c\boldsymbol{G}^T\Delta t$ 构建。若需精确建模，应按上式分别设置各分块对角元素。
 
 ### 3.4 离散化状态转移矩阵
 

@@ -98,9 +98,6 @@ namespace nav_data_handle {
         Eigen::Matrix4d R_; // 观测噪声 - observeWheel 观测量 vx, vy, vz, wz
         Eigen::Matrix2d R_tilt_; // 观测噪声 - observeZeroTilt 观测量 pitch, roll
 
-        // 自适应 R: 直走(小)→转弯(大)平滑过渡，兼顾防漂移和防反转
-        double r_11_low_ = 0.005, r_22_low_ = 0.005;
-        double r_11_high_ = 0.05, r_22_high_ = 0.05;
 
         // 零偏标定状态机
         enum class CalibState { CALIBRATING, RUNNING };

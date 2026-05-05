@@ -88,8 +88,6 @@ namespace nav_data_handle {
         this->declare_parameter("eskf.q_b_g", 0.001);
         this->declare_parameter("eskf.r_11", 0.005);
         this->declare_parameter("eskf.r_22", 0.005);
-        this->declare_parameter("eskf.r_11_high", 0.05);
-        this->declare_parameter("eskf.r_22_high", 0.05);
         this->declare_parameter("eskf.r_33", 0.005);
         this->declare_parameter("eskf.r_44", 0.005);
         this->declare_parameter("eskf.r_tilt_11", 0.005);
@@ -109,8 +107,6 @@ namespace nav_data_handle {
         double q_b_g      = this->get_parameter("eskf.q_b_g").as_double();
         double r_11       = this->get_parameter("eskf.r_11").as_double();
         double r_22       = this->get_parameter("eskf.r_22").as_double();
-        double r_11_high  = this->get_parameter("eskf.r_11_high").as_double();
-        double r_22_high  = this->get_parameter("eskf.r_22_high").as_double();
         double r_33       = this->get_parameter("eskf.r_33").as_double();
         double r_44       = this->get_parameter("eskf.r_44").as_double();
         double r_tilt_11  = this->get_parameter("eskf.r_tilt_11").as_double();
@@ -123,32 +119,24 @@ namespace nav_data_handle {
 
         // 参数有效性检查
         if (P_init <= 0.0 || Q_init <= 0.0 || q_b_a <= 0.0 || q_b_g <= 0.0 ||
-            r_11 <= 0.0 || r_22 <= 0.0 || r_11_high <= 0.0 || r_22_high <= 0.0 ||
+            r_11 <= 0.0 || r_22 <= 0.0 ||
             r_33 <= 0.0 || r_44 <= 0.0 ||
             r_tilt_11 <= 0.0 || r_tilt_22 <= 0.0) {
 
             RCLCPP_ERROR(
                 this->get_logger(),
                 "ESKF 噪声参数必须为正数！收到 P=%.6f, Q=%.6f, q_b_a=%.6f, q_b_g=%.6f, "
-                "r_11=%.6f, r_22=%.6f, r_11_high=%.6f, r_22_high=%.6f, "
-                "r_33=%.6f, r_44=%.6f, "
+                "r_11=%.6f, r_22=%.6f, r_33=%.6f, r_44=%.6f, "
                 "r_tilt_11=%.6f, r_tilt_22=%.6f，将使用默认值",
                 P_init, Q_init, q_b_a, q_b_g,
-                r_11, r_22, r_11_high, r_22_high,
-                r_33, r_44,
+                r_11, r_22, r_33, r_44,
                 r_tilt_11, r_tilt_22);
             P_init     = 0.01;
             Q_init     = 0.005;
             q_b_a = q_b_g = 0.001;
-            r_11 = r_22 = r_11_high = r_22_high = r_33 = r_44 = 0.005;
+            r_11 = r_22 = r_33 = r_44 = 0.005;
             r_tilt_11 = r_tilt_22 = 0.005;
         }
-        // 存储高低档参数（成员变量，observeWheel 中自适应使用）
-        r_11_low_  = r_11;
-        r_22_low_  = r_22;
-        r_11_high_ = r_11_high;
-        r_22_high_ = r_22_high;
-
         P_      = Eigen::Matrix<double, 15, 15>::Identity() * P_init;
         Q_      = Eigen::Matrix<double, 15, 15>::Identity() * Q_init;
         // 位置部分独立噪声（δp: 0-2）
@@ -542,13 +530,6 @@ namespace nav_data_handle {
         // ∂h_w/∂δb_g = -R_imu_to_body_.row(2)（精确值，含 x/y 交叉项）
         H.block<1, 3>(3, 12) = -R_imu_to_body_.row(2);
 
-        // 自适应 R(0,0)/R(1,1)：直走时用小 R（强 v_anti 防漂移），转弯时用大 R（弱 v_anti 防反转）
-        // 过渡区间：|wz| ∈ [0.15, 0.35] rad/s 线性插值
-        double wz_mag = std::max(std::abs(w_body_clean.z()), std::abs(y(3)));
-        double alpha = std::clamp((wz_mag - 0.15) / 0.20, 0.0, 1.0);
-        R_(0, 0) = r_11_low_ + alpha * (r_11_high_ - r_11_low_);
-        R_(1, 1) = r_22_low_ + alpha * (r_22_high_ - r_22_low_);
-
         // 卡尔曼增益 Kk (15×4)
         auto S = H * P_ * H.transpose() + R_;
         Eigen::Matrix<double, 15, 4> Kk =
@@ -718,37 +699,67 @@ namespace nav_data_handle {
         bias_gyro_pub_->publish(bg_msg);
     }
 
-    // IESKF 迭代观测更新：复用 observeWheel/observeZeroTilt/constrainYawRate + injectAndReset
-    // x_iter 就是 q_/v_/p_/b_a_/b_g_ 自身，injectAndReset 直接修改它们
-    // 每轮：重置 P 和 δx → 观测函数在当前 x_iter 上重线性化 → inject 更新 x_iter
+    // IESKF 迭代观测更新：跨迭代累积 δx，末次一次性注入
+    // 每轮：重置 P/δx → 观测在当前状态上重线性化 → 累积 δx → 手动更新状态供下轮重线性化
+    // 循环结束后：一次性 injectAndReset + P 旋转
     void NavDataHandle::iteratedObserve(double dt) {
 
-        P_prop_ = P_;
+        // 保存 predict 后的完整名义状态
+        p_prop_   = p_;
+        v_prop_   = v_;
+        q_prop_   = q_;
+        b_a_prop_ = b_a_;
+        b_g_prop_ = b_g_;
+        P_prop_   = P_;
+
+        Eigen::Matrix<double, 15, 1> dx_accum =
+            Eigen::Matrix<double, 15, 1>::Zero();
 
         int actual_iters = 0;
         for (int iter = 0; iter < iter_max_; iter ++) {
 
-            actual_iters++;
+            actual_iters ++;
 
-            // 重置 P 和 δx（避免上一轮 Joseph 更新导致 P 过度收缩）
+            // 重置 P 和 δx
             P_ = P_prop_;
             delta_x_.setZero();
 
-            // 观测函数用当前 q_/v_（x_iter）计算 H、h(x)，自然重线性化
+            // 观测函数用当前 q_/v_（x_iter）计算 H、h(x)，结果累加到 δx
             observeWheel();
             observeZeroTilt();
-            // constrainYawRate(dt);
 
-            // injectAndReset 把 δx 注入到 q_/v_/b_a_/b_g_（即更新 x_iter），并清零 δx
-            Eigen::Matrix<double, 15, 1> dx = delta_x_;
-            injectAndReset();
+            // 累积本轮 δx
+            dx_accum += delta_x_;
 
             // 收敛检查
-            if (dx.norm() < eps_dx_) break;
+            if (delta_x_.norm() < eps_dx_) break;
+
+            // 手动更新状态供下一轮重线性化（不调 injectAndReset，避免重复注入和清零）
+            p_   = p_prop_   + dx_accum.segment<3>(0);
+            v_   = v_prop_   + dx_accum.segment<3>(3);
+            b_a_ = b_a_prop_ + dx_accum.segment<3>(9);
+            b_g_ = b_g_prop_ + dx_accum.segment<3>(12);
+            Eigen::Vector3d dr = dx_accum.segment<3>(6);
+            double nr = dr.norm();
+            if (nr > 1e-10) {
+                q_ = (q_prop_ * Eigen::Quaterniond(
+                    Eigen::AngleAxisd(nr, dr.normalized()))).normalized();
+            }
         }
 
-        // inject 后旋转 P 到新切空间（消除切空间错位的协方差几何误差）
-        // 否则协方差会逐渐偏离真实切空间（因为每次inject后，实际位置是在流形上移动的，两个位点的切空间显然不一样）
+        // fused_wz（状态已在循环末次迭代注入，无需重复）
+        Eigen::Vector3d w_imu = R_imu_to_body_ * (gyro_filtered_ - b_g_);
+        fused_wz_ = w_imu.z() + dx_accum(8) / last_dt_;
+
+        // 发布零偏
+        delta_x_.setZero();
+        geometry_msgs::msg::Vector3 ba_msg, bg_msg;
+        ba_msg.x = b_a_.x(); ba_msg.y = b_a_.y(); ba_msg.z = b_a_.z();
+        bg_msg.x = b_g_.x(); bg_msg.y = b_g_.y(); bg_msg.z = b_g_.z();
+        bias_acc_pub_->publish(ba_msg);
+        bias_gyro_pub_->publish(bg_msg);
+
+        // 旋转 P 到新切空间
         Eigen::Quaterniond qe = q_prop_.conjugate() * q_;
         if (qe.w() < 0.0) qe.coeffs() = -qe.coeffs();
         Eigen::Vector3d qev(qe.x(), qe.y(), qe.z());
@@ -757,9 +768,10 @@ namespace nav_data_handle {
         if (ne < 1e-10) dte = 2.0 * qev;
         else dte = 2.0 * std::atan2(ne, qe.w()) / ne * qev;
         if (std::isfinite(dte.norm())) {
-
+            
             Eigen::Matrix3d Ae = A_matrix(dte);
-            Eigen::Matrix<double, 15, 15> Af = Eigen::Matrix<double, 15, 15>::Identity();
+            Eigen::Matrix<double, 15, 15> Af =
+                Eigen::Matrix<double, 15, 15>::Identity();
             Af.block<3, 3>(6, 6) = Ae;
             P_ = Af.transpose() * P_ * Af;
         }
