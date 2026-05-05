@@ -222,7 +222,120 @@ ros2 launch my_nav2_robot full.launch.py
 
 ---
 
-## 四、参考
+## 四、iPad 远程编写代码
+
+### 4.1 使用 code-server（网页 VSCode）
+
+code-server 在 Ubuntu 上运行 VS Code 的服务端，iPad 通过浏览器访问即可获得完整的 VS Code 编辑体验。
+
+#### 4.1.1 安装 code-server
+
+```bash
+# 官方一键安装脚本
+curl -fsSL https://code-server.dev/install.sh | sh
+```
+
+#### 4.1.2 配置连接密码与端口
+
+编辑配置文件：
+
+```bash
+nano ~/.config/code-server/config.yaml
+```
+
+默认内容如下，按需修改：
+
+```yaml
+bind-addr: 0.0.0.0:8080   # 监听所有网卡的 8080 端口（默认仅 127.0.0.1，需改为 0.0.0.0）
+auth: password              # 认证方式：password
+password: your_password     # 连接密码，改为自己的强密码
+cert: false                 # 无 HTTPS 证书（局域网内可关闭）
+```
+
+> **关键**：`bind-addr` 必须改为 `0.0.0.0:8080`，否则仅本机可访问，iPad 无法连接。
+
+#### 4.1.3 启动与状态管理
+
+```bash
+# 启动并设置开机自启
+sudo systemctl enable --now code-server@$USER
+
+# 查看运行状态
+sudo systemctl status code-server@$USER
+
+# 重启（修改配置后需要重启生效）
+sudo systemctl restart code-server@$USER
+
+# 停止
+sudo systemctl stop code-server@$USER
+
+# 查看日志（排查问题）
+journalctl -u code-server@$USER -f
+```
+
+#### 4.1.4 防火墙放行
+
+```bash
+sudo ufw allow 8080
+```
+
+#### 4.1.5 iPad Safari 连接
+
+1. 确保 iPad 与 Ubuntu 处于**同一局域网**
+2. 在 Ubuntu 上查看 IP：
+
+```bash
+ip addr show | grep "inet " | grep -v 127.0.0.1
+```
+
+3. iPad 打开 **Safari**，地址栏输入：
+
+```
+http://<ubuntu-ip>:8080
+```
+
+4. 输入配置文件中设置的密码，即可进入完整的 VS Code 界面，开始编写代码
+
+> **提示**：Safari 对 WebSocket 支持良好，code-server 的终端、扩展等功能均可正常使用。建议将页面"添加到主屏幕"以获得类 App 体验。
+
+---
+
+### 4.2 使用 Koder（SFTP 快速编辑）
+
+Koder 是 iPad 上的轻量级代码编辑器，支持 SFTP 协议直接读写远程服务器文件，适合快速编辑单个文件而无需启动完整 VS Code。
+
+#### 4.2.1 安装 Koder
+
+在 App Store 搜索 **Koder** 并安装。
+
+#### 4.2.2 新建 SFTP 连接
+
+1. 打开 Koder → 点击 **+** → 选择 **SFTP/SSH**
+2. 填写连接信息：
+
+| 字段 | 填写内容 |
+|------|---------|
+| Name | 自定义名称，如 `Ubuntu Dev` |
+| Host | Ubuntu 的 IP 地址 |
+| Port | `22`（默认 SSH 端口） |
+| Username | Ubuntu 用户名 |
+| Password | 对应用户密码（或使用 SSH 密钥） |
+| URL | 一般前端调试用，可空 |
+| Path | 远程目录，如 `/home/<user>/ace_ass/src/`，可空，但建议填写|
+
+3. 点击 **Connect** 建立连接（或直接点击文件夹图标进入目录）
+
+#### 4.2.3 编辑代码
+
+- 连接成功后浏览远程目录（如 `/home/<user>/ace_ass/src/`）
+- 点击文件即可编辑，保存时自动通过 SFTP 写回 Ubuntu
+- 支持语法高亮、多标签页编辑
+
+> **适用场景**：快速修改配置文件、单文件编辑、查看日志等轻量操作。如需终端交互或复杂项目管理，请使用 code-server。
+
+---
+
+## 五、参考
 
 - [socat 官方手册](https://linux.die.net/man/1/socat)
 - [Foxglove Studio 官方文档](https://foxglove.dev/docs)
