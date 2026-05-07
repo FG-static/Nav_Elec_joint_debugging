@@ -45,3 +45,12 @@ data_handle_node:
     # IESKF 迭代更新参数
     eskf.iter_max: 5               # 迭代次数（1=标准KF单次更新；>1 对轮速观测过度校正，会发散）
     eskf.eps_dx: 0.0001            # 收敛阈值（弧度），||δx|| < eps 时停止迭代
+
+    # 点云 ICP 观测参数
+    lidar.icp_leaf_size: 0.5         # 体素降采样边长 (m)，MID360 量程 ~40m，0.3 避免 int32 溢出
+    lidar.icp_fitness_threshold: 2.0 # fitness_score > 此值则丢弃（配准失败）
+    lidar.r_lidar_v: 0.05            # ICP 速度观测噪声 (m/s)，越小越信任 ICP
+    lidar.r_lidar_w: 0.02            # ICP 角速度观测噪声 (rad/s)，越小越信任 ICP
+    lidar.lidar_to_body_roll: 0.0    # 雷达系→车体系欧拉角 (rad)
+    lidar.lidar_to_body_pitch: 0.0
+    lidar.lidar_to_body_yaw: 3.14159265  # 方向反转 180°

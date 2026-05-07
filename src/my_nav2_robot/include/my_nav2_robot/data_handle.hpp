@@ -17,6 +17,63 @@
 #include <Eigen/Geometry>
 #include <string>
 #include <fstream>
+#include <mutex>
+#include "sensor_msgs/msg/point_cloud2.hpp"
+
+#include <pcl-1.14/pcl/point_cloud.h> // 点云基础类型
+#include <pcl-1.14/pcl/point_types.h> // 点类型定义
+#include <pcl_conversions/pcl_conversions.h> // ros2和pcl消息互转
+#include <pcl-1.14/pcl/filters/voxel_grid.h> // 滤波器
+#include <pcl-1.14/pcl/common/transforms.h> // 点云坐标变换
+
+#include <unordered_map>
+
+// FLANN (used by small_gicp) expects a serialization implementation for
+// std::unordered_map when saving/loading LSH indices. The system FLANN
+// version shipped with Ubuntu does not provide this specialization, so we
+// provide it here to avoid compilation errors.
+namespace flann {
+namespace serialization {
+
+// Forward-declare the primary template so we can provide a specialization
+// before the full FLANN serialization headers are included.
+template<typename T>
+struct Serializer;
+
+template<typename K, typename V>
+struct Serializer<std::unordered_map<K, V>>
+{
+  template<typename InputArchive>
+  static inline void load(InputArchive &ar, std::unordered_map<K, V> &map_val)
+  {
+    size_t size;
+    ar & size;
+    for (size_t i = 0; i < size; ++i) {
+      K key;
+      V value;
+      ar & key;
+      ar & value;
+      map_val.emplace(std::move(key), std::move(value));
+    }
+  }
+
+  template<typename OutputArchive>
+  static inline void save(OutputArchive &ar, const std::unordered_map<K, V> &map_val)
+  {
+    ar & map_val.size();
+    for (const auto &kv : map_val) {
+      ar & kv.first;
+      ar & kv.second;
+    }
+  }
+};
+
+}  // namespace serialization
+}  // namespace flann
+
+#include <small_gicp/pcl/pcl_registration.hpp> // pcl结合使用
+#include <small_gicp/registration/registration.hpp> // 核心注册算法
+#include <small_gicp/factors/gicp_factor.hpp>
 
 namespace nav_data_handle {
 
@@ -98,6 +155,29 @@ namespace nav_data_handle {
         Eigen::Matrix4d R_; // 观测噪声 - observeWheel 观测量 vx, vy, vz, wz
         Eigen::Matrix2d R_tilt_; // 观测噪声 - observeZeroTilt 观测量 pitch, roll
 
+        // 点云 ICP 观测
+        void lidarCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
+        void observeVelocity(
+            const Eigen::Vector4d &y_obs, const Eigen::Matrix<double, 4, 4> &R_obs);
+        Eigen::Matrix4d estimate_motion_with_gicp(
+            const pcl::PointCloud<pcl::PointXYZ>::Ptr &source_cloud,
+            const pcl::PointCloud<pcl::PointXYZ>::Ptr &target_cloud,
+            double &alignment_score
+        );
+        rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub_;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr prev_cloud_;
+
+        // ICP 结果缓冲（lidarCallback 计算，iteratedObserve 消费）
+        std::mutex icp_result_mtx_;
+        bool icp_result_ready_ = false;
+        Eigen::Vector4d icp_y_lidar_ = Eigen::Vector4d::Zero();
+
+        uint32_t last_lidar_t_ms_ = 0;
+        rclcpp::Time lidar_start_time_;
+        double voxel_leaf_size_ = 0.05;
+        double icp_fitness_threshold_ = 0.5;
+        Eigen::Matrix<double, 4, 4> R_lidar_;
+        Eigen::Matrix3d R_lidar_to_body_;  // 雷达系 → 车体系旋转
 
         // 零偏标定状态机
         enum class CalibState { CALIBRATING, RUNNING };

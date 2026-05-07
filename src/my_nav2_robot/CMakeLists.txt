@@ -17,10 +17,14 @@ find_package(Eigen3 REQUIRED)
 find_package(Sophus REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(rm_interfaces REQUIRED)
+find_package(PCL REQUIRED)
+find_package(pcl_conversions REQUIRED)
+find_package(small_gicp REQUIRED)
 
-include_directories(include)
+include_directories(include ${PCL_INCLUDE_DIRS})
 
 add_executable(data_handle_node src/data_handle.cpp)
+add_executable(imu_adapter_node src/imu_adapter.cpp)
 
 ament_target_dependencies(data_handle_node
   rclcpp
@@ -31,10 +35,19 @@ ament_target_dependencies(data_handle_node
   tf2_eigen
   Eigen3
   rm_interfaces
+  pcl_conversions
+)
+target_link_libraries(data_handle_node ${PCL_LIBRARIES} small_gicp::small_gicp)
+
+ament_target_dependencies(imu_adapter_node
+  rclcpp
+  sensor_msgs
+  rm_interfaces
 )
 
 install(TARGETS
   data_handle_node
+  imu_adapter_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

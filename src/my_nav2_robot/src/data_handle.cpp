@@ -54,6 +54,18 @@ namespace nav_data_handle {
         );
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(* this);
 
+        // 点云订阅：独立回调组，GICP 在此线程执行，不阻塞 IMU 200Hz 回调
+        auto lidar_cb_group = this->create_callback_group(
+            rclcpp::CallbackGroupType::MutuallyExclusive);
+        rclcpp::SubscriptionOptions lidar_opts;
+        lidar_opts.callback_group = lidar_cb_group;
+        lidar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+            "/livox/lidar/pointcloud", rclcpp::SensorDataQoS(),
+            [this](const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+                lidarCallback(msg);
+            }, lidar_opts
+        );
+
         // 初始化ESKF变量
         p_.setZero();
         v_.setZero();
@@ -70,6 +82,7 @@ namespace nav_data_handle {
         // IMU 外参标定矩阵（IMU 系 → 车体系），初始化为单位阵
         // 实际值将在零偏标定阶段根据重力方向自动计算（仅 pitch/roll，忽略 yaw）
         R_imu_to_body_.setIdentity();
+        R_lidar_to_body_.setIdentity();
 
         // 从配置文件加载 P、Q、R、R_tilt 参数
         loadESKFParams();
@@ -154,6 +167,37 @@ namespace nav_data_handle {
         R_tilt_ = Eigen::Matrix2d::Zero();
         R_tilt_(0, 0) = r_tilt_11;
         R_tilt_(1, 1) = r_tilt_22;
+
+        // 点云 ICP 观测参数
+        this->declare_parameter("lidar.icp_leaf_size", 0.1);
+        this->declare_parameter("lidar.icp_fitness_threshold", 0.5);
+        this->declare_parameter("lidar.r_lidar_v", 0.05);
+        this->declare_parameter("lidar.r_lidar_w", 0.02);
+        voxel_leaf_size_       = this->get_parameter("lidar.icp_leaf_size").as_double();
+        icp_fitness_threshold_ = this->get_parameter("lidar.icp_fitness_threshold").as_double();
+        double r_lidar_v       = this->get_parameter("lidar.r_lidar_v").as_double();
+        double r_lidar_w       = this->get_parameter("lidar.r_lidar_w").as_double();
+        R_lidar_ = Eigen::Matrix<double, 4, 4>::Zero();
+        R_lidar_(0, 0) = r_lidar_v;  // vx
+        R_lidar_(1, 1) = r_lidar_v;  // vy
+        R_lidar_(2, 2) = r_lidar_v;  // vz
+        R_lidar_(3, 3) = r_lidar_w;  // wz
+
+        // 雷达系 → 车体系旋转（欧拉角 ZYX）
+        this->declare_parameter("lidar.lidar_to_body_roll", 0.0);
+        this->declare_parameter("lidar.lidar_to_body_pitch", 0.0);
+        this->declare_parameter("lidar.lidar_to_body_yaw", 3.14159265);
+        double lb_roll  = this->get_parameter("lidar.lidar_to_body_roll").as_double();
+        double lb_pitch = this->get_parameter("lidar.lidar_to_body_pitch").as_double();
+        double lb_yaw   = this->get_parameter("lidar.lidar_to_body_yaw").as_double();
+        R_lidar_to_body_ = (
+            Eigen::AngleAxisd(lb_yaw,   Eigen::Vector3d::UnitZ()) *
+            Eigen::AngleAxisd(lb_pitch, Eigen::Vector3d::UnitY()) *
+            Eigen::AngleAxisd(lb_roll,  Eigen::Vector3d::UnitX())
+        ).toRotationMatrix();
+        RCLCPP_INFO(this->get_logger(),
+            "R_lidar_to_body: yaw=%.2f pitch=%.2f roll=%.2f",
+            lb_yaw, lb_pitch, lb_roll);
 
         RCLCPP_INFO(
             this->get_logger(),
@@ -469,6 +513,11 @@ namespace nav_data_handle {
 
         // 解算底盘速度（使用低通滤波后的轮速数据）
         Eigen::Vector<double, 4> wheel_v = wheel_filtered_;
+
+        // 轮速全为零时跳过观测（无轮速传感器 / rosbag 回放场景）
+        if (wheel_v.squaredNorm() < 1e-12) {
+            return;
+        }
         // 全向轮运动学（正交布局，辊子与底盘xy轴呈45°）：
         //   vx = r/(4*cos45°) * ( w_fl + w_fr + w_rl + w_rr)
         //   vy = r/(4*cos45°) * (-w_fl + w_fr + w_rl - w_rr)
@@ -495,6 +544,25 @@ namespace nav_data_handle {
         //     但我们直接用陀螺仪测量的 gyro_z 作为 h_w 的基线更好
         //     这里用更直接的方式：h_w = (R^T * q_omega)_z = (R^T * R * w_body)_z = w_body_z
         //     简化后 h_w = gyro_z - b_g_z（已补偿零偏的陀螺仪 z 轴输出）
+
+        observeVelocity(y, R_);
+
+        // 发布wz: x=轮速wz, y=IMU gyro wz, z=ESKF卡尔曼融合wz
+        Eigen::Vector3d w_imu  = gyro_filtered_ - b_g_;
+        Eigen::Vector3d w_body = R_imu_to_body_ * w_imu;
+        geometry_msgs::msg::Vector3 wz_msg;
+        wz_msg.x = y(3);
+        wz_msg.y = w_body(2);
+        wz_msg.z = fused_wz_;
+        wz_pub_->publish(wz_msg);
+    }
+
+    void NavDataHandle::observeVelocity(
+        const Eigen::Vector4d &y_obs, const Eigen::Matrix<double, 4, 4> &R_obs
+    ) {
+
+        // 4 维观测模型：y = [vx, vy, vz, wz]（车体系）
+        // h(x) = [R^T * v_world,  w_body_z]
         Eigen::Matrix3d R = q_.toRotationMatrix();
         Eigen::Matrix3d R_T = R.transpose();
         Eigen::Vector3d v_body = R_T * v_;  // 世界系速度 → 车体系速度
@@ -531,46 +599,19 @@ namespace nav_data_handle {
         H.block<1, 3>(3, 12) = -R_imu_to_body_.row(2);
 
         // 卡尔曼增益 Kk (15×4)
-        auto S = H * P_ * H.transpose() + R_;
+        auto S = H * P_ * H.transpose() + R_obs;
         Eigen::Matrix<double, 15, 4> Kk =
             P_ * H.transpose() * S.inverse();
 
-        // 更新误差状态 delta_x
-        delta_x_ += Kk * (y - h_x);
+        // 更新误差状态
+        delta_x_ += Kk * (y_obs - h_x);
 
-        // 诊断：每隔 ~200 帧（约 1 秒）打印一轮 innovation 和 b_g 更新量
-        {
-            static int diag_cnt = 0;
-            if (++diag_cnt >= 200) {
-                diag_cnt = 0;
-                Eigen::Vector4d innov = y - h_x;
-                double dbg_z = Kk(14, 3) * innov(3);
-                RCLCPP_WARN(
-                    this->get_logger(),
-                    "DIAG: innov_wz=%.4f, h_x_wz=%.4f, y_wz=%.4f, "
-                    "Kk_bg_z=%.8f, Δb_g_z=%.6f, b_g_z=%.4f, "
-                    "P_bg_z=%.8f",
-                    innov(3), h_x(3), y(3),
-                    Kk(14, 3), dbg_z, b_g_.z(),
-                    P_(14, 14));
-            }
-        }
-
-        // 更新状态误差协方差矩阵（Joseph 形式）
+        // Joseph 形式更新协方差
         Eigen::Matrix<double, 15, 15> I15 =
             Eigen::Matrix<double, 15, 15>::Identity();
         P_ = (I15 - Kk * H) * P_ *
              (I15 - Kk * H).transpose() +
-             Kk * R_ * Kk.transpose();
-
-        // 发布wz: x=轮速wz, y=IMU gyro wz, z=ESKF卡尔曼融合wz
-        Eigen::Vector3d w_imu  = gyro_filtered_ - b_g_;
-        Eigen::Vector3d w_body = R_imu_to_body_ * w_imu;
-        geometry_msgs::msg::Vector3 wz_msg;
-        wz_msg.x = y(3);
-        wz_msg.y = w_body(2);
-        wz_msg.z = fused_wz_;
-        wz_pub_->publish(wz_msg);
+             Kk * R_obs * Kk.transpose();
     }
 
     void NavDataHandle::observeZeroTilt() {
@@ -712,6 +753,18 @@ namespace nav_data_handle {
         b_g_prop_ = b_g_;
         P_prop_   = P_;
 
+        // 消费 lidarCallback 异步计算的 ICP 结果
+        Eigen::Vector4d y_lidar = Eigen::Vector4d::Zero();
+        bool use_lidar = false;
+        {
+            std::lock_guard<std::mutex> lock(icp_result_mtx_);
+            if (icp_result_ready_) {
+                y_lidar = icp_y_lidar_;
+                use_lidar = true;
+                icp_result_ready_ = false;
+            }
+        }
+
         Eigen::Matrix<double, 15, 1> dx_accum =
             Eigen::Matrix<double, 15, 1>::Zero();
 
@@ -726,6 +779,10 @@ namespace nav_data_handle {
 
             // 观测函数用当前 q_/v_（x_iter）计算 H、h(x)，结果累加到 δx
             observeWheel();
+            if (use_lidar) {
+
+                observeVelocity(y_lidar, R_lidar_);
+            }
             observeZeroTilt();
 
             // 累积本轮 δx
@@ -742,6 +799,7 @@ namespace nav_data_handle {
             Eigen::Vector3d dr = dx_accum.segment<3>(6);
             double nr = dr.norm();
             if (nr > 1e-10) {
+                
                 q_ = (q_prop_ * Eigen::Quaterniond(
                     Eigen::AngleAxisd(nr, dr.normalized()))).normalized();
             }
@@ -886,13 +944,155 @@ namespace nav_data_handle {
 
         path_raw_pub_->publish(path_raw_);
     }
+
+    Eigen::Matrix4d NavDataHandle::estimate_motion_with_gicp(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr &source_cloud,
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr &target_cloud,
+        double &alignment_score
+    ) {
+
+        // 体素降采样
+        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+        voxel_filter.setLeafSize(voxel_leaf_size_, voxel_leaf_size_, voxel_leaf_size_);
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_target(new pcl::PointCloud<pcl::PointXYZ>);
+        voxel_filter.setInputCloud(target_cloud);
+        voxel_filter.filter(*filtered_target);
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_source(new pcl::PointCloud<pcl::PointXYZ>);
+        voxel_filter.setInputCloud(source_cloud);
+        voxel_filter.filter(*filtered_source);
+
+        // 移除无效点
+        pcl::PointCloud<pcl::PointXYZ>::Ptr clean_target(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr clean_source(new pcl::PointCloud<pcl::PointXYZ>);
+        for (const auto& p : filtered_target->points) {
+            if (pcl::isFinite(p)) clean_target->points.push_back(p);
+        }
+        for (const auto& p : filtered_source->points) {
+            if (pcl::isFinite(p)) clean_source->points.push_back(p);
+        }
+
+        // 点数不足时返回单位阵
+        if (clean_target->size() < 10 || clean_source->size() < 10) {
+            alignment_score = 1e9;
+            return Eigen::Matrix4d::Identity();
+        }
+
+        // GICP 配准
+        small_gicp::RegistrationPCL<pcl::PointXYZ, pcl::PointXYZ> reg;
+        reg.setNumThreads(4);
+        reg.setCorrespondenceRandomness(20);
+        reg.setMaxCorrespondenceDistance(1.0);
+        reg.setRegistrationType("GICP");
+
+        reg.setInputTarget(clean_target);
+        reg.setInputSource(clean_source);
+
+        auto aligned = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        Eigen::Matrix4f init_guess = Eigen::Matrix4f::Identity();
+        reg.align(*aligned, init_guess);
+
+        alignment_score = reg.getFitnessScore();
+
+        // 返回 source → target 的变换矩阵（4×4）
+        Eigen::Matrix4d T = reg.getFinalTransformation().cast<double>();
+        return T;
+    }
+
+    void NavDataHandle::lidarCallback(
+        const sensor_msgs::msg::PointCloud2::SharedPtr msg
+    ) {
+
+        // 将 ROS 点云转为 PCL 格式，移除 NaN/Inf
+        auto raw = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        pcl::fromROSMsg(*msg, *raw);
+        auto cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        std::vector<int> indices;
+        pcl::removeNaNFromPointCloud(*raw, *cloud, indices);
+
+        static int cb_cnt = 0;
+        if (++cb_cnt <= 5 || cb_cnt % 100 == 0) {
+            RCLCPP_INFO(this->get_logger(),
+                "LIDAR CB #%d: raw=%zu, after_NaN=%zu",
+                cb_cnt, raw->size(), cloud->size());
+        }
+
+        // 相对时间戳
+        if (lidar_start_time_.nanoseconds() == 0) {
+
+            lidar_start_time_ = this->now();
+        }
+        uint32_t t_ms = static_cast<uint32_t>(
+            (this->now() - lidar_start_time_).nanoseconds() / 1000000);
+
+        // GICP 在此线程执行（不阻塞 IMU 200Hz 回调）
+        if (prev_cloud_ && prev_cloud_->size() > 0 && cloud->size() > 0) {
+            
+            double score = 0.0;
+            Eigen::Matrix4d T = estimate_motion_with_gicp(
+                prev_cloud_, cloud, score);
+
+            double lidar_dt = static_cast<double>(t_ms - last_lidar_t_ms_) / 1000.0;
+
+            RCLCPP_INFO_THROTTLE(
+                this->get_logger(), *this->get_clock(), 1000,
+                "ICP RESULT: score=%.4f thresh=%.4f dt=%.3f pts=%zu",
+                score, icp_fitness_threshold_, lidar_dt, cloud->size());
+
+            if (score < icp_fitness_threshold_ &&
+                lidar_dt > 0.01 && lidar_dt < 1.0) {
+
+                Eigen::Vector3d t = T.block<3, 1>(0, 3);
+                Eigen::Matrix3d R_icp = T.block<3, 3>(0, 0);
+                Eigen::Vector3d v_icp = t / lidar_dt;
+
+                Eigen::AngleAxisd aa(R_icp);
+                Eigen::Vector3d w_icp = aa.angle() * aa.axis() / lidar_dt;
+
+                // 雷达系 → 车体系
+                v_icp = R_lidar_to_body_ * v_icp;
+                w_icp = R_lidar_to_body_ * w_icp;
+
+                // 合理性检查
+                double v_xy = v_icp.head<2>().norm();
+                if (v_xy > 2.0 || std::abs(w_icp.z()) > 2.0) {
+                    RCLCPP_WARN_THROTTLE(
+                        this->get_logger(), *this->get_clock(), 1000,
+                        "ICP REJECTED: |v_xy|=%.3f wz=%.3f", v_xy, w_icp.z());
+                } else {
+                    Eigen::Vector4d y;
+                    y(0) = v_icp.x();
+                    y(1) = v_icp.y();
+                    y(2) = 0.0;
+                    y(3) = w_icp.z();
+
+                    RCLCPP_INFO_THROTTLE(
+                        this->get_logger(), *this->get_clock(), 1000,
+                        "ICP OK: v=[%.3f, %.3f, %.3f] wz=%.3f",
+                        v_icp.x(), v_icp.y(), v_icp.z(), w_icp.z());
+
+                    std::lock_guard<std::mutex> lock(icp_result_mtx_);
+                    icp_y_lidar_ = y;
+                    icp_result_ready_ = true;
+                }
+            }
+        }
+
+        prev_cloud_ = cloud;
+        last_lidar_t_ms_ = t_ms;
+    }
+
 } // nav_data_handle
 
 int main(int argc, char **argv) {
 
     rclcpp::init(argc, argv);
     auto node = std::make_shared<nav_data_handle::NavDataHandle>();
-    rclcpp::spin(node);
+    // 多线程执行器：lidarCallback 与 gimbalCallBack 并行，GICP 不阻塞 IMU
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+    executor.add_node(node);
+    executor.spin();
     rclcpp::shutdown();
     return 0;
 }

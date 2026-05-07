@@ -99,6 +99,14 @@ def generate_launch_description():
         parameters=[eskf_config_file]
     )
 
+    # imu数据处理节点
+    imu_adapter_node = Node(
+        package='my_nav2_robot',
+        executable='imu_adapter_node',
+        name='imu_adapter_node',
+        output='screen'
+    )
+
     # 启动节点
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -110,5 +118,6 @@ def generate_launch_description():
         rviz_node,
         node_robot_state_publisher,
         joint_state_publisher_node,
-        data_handle_node
+        data_handle_node,
+        imu_adapter_node
     ])
