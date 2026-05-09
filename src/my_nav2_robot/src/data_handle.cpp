@@ -52,6 +52,9 @@ namespace nav_data_handle {
         wheel_vel_filtered_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
             "/wheel_vel/filtered", 10
         );
+        aligned_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+            "/gicp/aligned_cloud", 20
+        );
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(* this);
 
         // 点云订阅：独立回调组，GICP 在此线程执行，不阻塞 IMU 200Hz 回调
@@ -175,8 +178,19 @@ namespace nav_data_handle {
         this->declare_parameter("lidar.r_lidar_vy", 0.05);
         this->declare_parameter("lidar.r_lidar_vz", 0.05);
         this->declare_parameter("lidar.r_lidar_wz", 0.02);
+        this->declare_parameter("lidar.publish_aligned_cloud", false);
+        this->declare_parameter("lidar.max_points_before_gicp", 0);
         voxel_leaf_size_       = this->get_parameter("lidar.icp_leaf_size").as_double();
         icp_fitness_threshold_ = this->get_parameter("lidar.icp_fitness_threshold").as_double();
+        publish_aligned_cloud_ = this->get_parameter("lidar.publish_aligned_cloud").as_bool();
+        max_points_before_gicp_ = this->get_parameter("lidar.max_points_before_gicp").as_int();
+        if (max_points_before_gicp_ < 0) {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "lidar.max_points_before_gicp=%d 无效，已按 0（不限制）处理",
+                max_points_before_gicp_);
+            max_points_before_gicp_ = 0;
+        }
         R_lidar_ = Eigen::Matrix<double, 4, 4>::Zero();
         R_lidar_(0, 0) = this->get_parameter("lidar.r_lidar_vx").as_double();
         R_lidar_(1, 1) = this->get_parameter("lidar.r_lidar_vy").as_double();
@@ -950,7 +964,8 @@ namespace nav_data_handle {
     Eigen::Matrix4d NavDataHandle::estimate_motion_with_gicp(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr &source_cloud,
         const pcl::PointCloud<pcl::PointXYZ>::Ptr &target_cloud,
-        double &alignment_score
+        double &alignment_score,
+        pcl::PointCloud<pcl::PointXYZ>::Ptr &aligned_cloud
     ) {
 
         // 体素降采样
@@ -996,6 +1011,7 @@ namespace nav_data_handle {
         reg.align(*aligned, init_guess);
 
         alignment_score = reg.getFitnessScore();
+        aligned_cloud = aligned;
 
         // 返回 source → target 的变换矩阵（4×4）
         Eigen::Matrix4d T = reg.getFinalTransformation().cast<double>();
@@ -1020,12 +1036,35 @@ namespace nav_data_handle {
                 cb_cnt, raw->size(), cloud->size());
         }
 
-        // 相对时间戳
-        if (lidar_start_time_.nanoseconds() == 0) {
-            lidar_start_time_ = this->now();
+        // 使用点云消息时间戳计算帧间隔，避免 GICP 执行耗时/回放调度抖动污染速度观测
+        int64_t lidar_stamp_ns = rclcpp::Time(msg->header.stamp).nanoseconds();
+        if (lidar_stamp_ns <= 0) {
+            lidar_stamp_ns = this->now().nanoseconds();
         }
-        uint32_t t_ms = static_cast<uint32_t>(
-            (this->now() - lidar_start_time_).nanoseconds() / 1000000);
+        int64_t wall_stamp_ns = this->now().nanoseconds();
+        double wall_callback_dt = 0.0;
+        if (last_lidar_wall_ns_ > 0) {
+            wall_callback_dt = static_cast<double>(wall_stamp_ns - last_lidar_wall_ns_) * 1e-9;
+        }
+
+        auto cloud_for_gicp = cloud;
+        if (max_points_before_gicp_ > 0 &&
+            cloud->size() > static_cast<size_t>(max_points_before_gicp_)) {
+
+            auto limited_cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+            limited_cloud->reserve(max_points_before_gicp_);
+            double stride = static_cast<double>(cloud->size()) /
+                            static_cast<double>(max_points_before_gicp_);
+            for (int i = 0; i < max_points_before_gicp_; i ++) {
+                size_t idx = static_cast<size_t>(i * stride);
+                if (idx >= cloud->size()) idx = cloud->size() - 1;
+                limited_cloud->points.push_back(cloud->points[idx]);
+            }
+            limited_cloud->width = static_cast<uint32_t>(limited_cloud->points.size());
+            limited_cloud->height = 1;
+            limited_cloud->is_dense = cloud->is_dense;
+            cloud_for_gicp = limited_cloud;
+        }
 
         // 高角速度时重置 GICP 初始猜测为单位阵，避免上一帧错误配准传播
         if (gyro_filtered_.norm() > 1.5) {
@@ -1033,25 +1072,51 @@ namespace nav_data_handle {
         }
 
         // GICP 在此线程执行（不阻塞 IMU 200Hz 回调）
-        if (prev_cloud_ && prev_cloud_->size() > 0 && cloud->size() > 0) {
+        if (prev_cloud_ && prev_cloud_->size() > 0 && cloud_for_gicp->size() > 0) {
 
             double score = 0.0;
             // 观测gicp匹配用时
-            auto t1 = this->now();
+            int64_t gicp_start_ns = this->now().nanoseconds();
+            pcl::PointCloud<pcl::PointXYZ>::Ptr aligned_cloud;
             Eigen::Matrix4d T = estimate_motion_with_gicp(
-                prev_cloud_, cloud, score);
+                prev_cloud_, cloud_for_gicp, score, aligned_cloud);
+            double gicp_cost_ms =
+                static_cast<double>(this->now().nanoseconds() - gicp_start_ns) * 1e-6;
             gicp_init_guess_ = T.cast<float>();
+
+            // 发布 GICP 对齐后的点云
+            if (publish_aligned_cloud_ && aligned_cloud && aligned_cloud->size() > 0) {
+                sensor_msgs::msg::PointCloud2 aligned_msg;
+                pcl::toROSMsg(*aligned_cloud, aligned_msg);
+                aligned_msg.header = msg->header;
+                aligned_cloud_pub_->publish(aligned_msg);
+            }
 
             // RCLCPP_WARN(
             //     this->get_logger(), "GICP算法耗时 dt = %.2f", this->now() - t1
             // );
 
-            double lidar_dt = static_cast<double>(t_ms - last_lidar_t_ms_) / 1000.0;
+            double lidar_dt =
+                static_cast<double>(lidar_stamp_ns - last_lidar_stamp_ns_) * 1e-9;
+            int skipped_scan_count = 0;
+            if (lidar_dt > 0.2) {
+                skipped_scan_count = std::max(0, static_cast<int>(std::round(lidar_dt / 0.1)) - 1);
+            }
 
             RCLCPP_INFO_THROTTLE(
                 this->get_logger(), *this->get_clock(), 1000,
-                "ICP RESULT: score=%.4f thresh=%.4f dt=%.3f pts=%zu",
-                score, icp_fitness_threshold_, lidar_dt, cloud->size());
+                "ICP RESULT: score=%.4f thresh=%.4f dt=%.3f wall_dt=%.3f "
+                "gicp=%.1fms skipped=%d pts=%zu/%zu",
+                score, icp_fitness_threshold_, lidar_dt, wall_callback_dt,
+                gicp_cost_ms, skipped_scan_count, cloud_for_gicp->size(), cloud->size());
+
+            if (skipped_scan_count > 0) {
+                RCLCPP_WARN_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 1000,
+                    "GICP DROPPED SCANS: header_dt=%.3f wall_dt=%.3f "
+                    "gicp=%.1fms skipped=%d",
+                    lidar_dt, wall_callback_dt, gicp_cost_ms, skipped_scan_count);
+            }
 
             if (score < icp_fitness_threshold_ &&
                 lidar_dt > 0.01 && lidar_dt < 1.0) {
@@ -1094,8 +1159,9 @@ namespace nav_data_handle {
             }
         }
 
-        prev_cloud_ = cloud;
-        last_lidar_t_ms_ = t_ms;
+        prev_cloud_ = cloud_for_gicp;
+        last_lidar_stamp_ns_ = lidar_stamp_ns;
+        last_lidar_wall_ns_ = wall_stamp_ns;
     }
 
 } // nav_data_handle

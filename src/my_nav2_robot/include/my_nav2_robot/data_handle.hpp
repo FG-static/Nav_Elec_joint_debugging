@@ -121,6 +121,7 @@ namespace nav_data_handle {
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gyro_compensated_pub_;
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr wheel_vel_raw_pub_;
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr wheel_vel_filtered_pub_;
+        rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr aligned_cloud_pub_;
         std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     
         // 名义状态
@@ -162,7 +163,8 @@ namespace nav_data_handle {
         Eigen::Matrix4d estimate_motion_with_gicp(
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &source_cloud,
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &target_cloud,
-            double &alignment_score
+            double &alignment_score,
+            pcl::PointCloud<pcl::PointXYZ>::Ptr &aligned_cloud
         );
         rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub_;
         pcl::PointCloud<pcl::PointXYZ>::Ptr prev_cloud_;
@@ -172,10 +174,12 @@ namespace nav_data_handle {
         bool icp_result_ready_ = false;
         Eigen::Vector4d icp_y_lidar_ = Eigen::Vector4d::Zero();
 
-        uint32_t last_lidar_t_ms_ = 0;
-        rclcpp::Time lidar_start_time_;
+        int64_t last_lidar_stamp_ns_ = 0;
+        int64_t last_lidar_wall_ns_ = 0;
         double voxel_leaf_size_ = 0.05;
         double icp_fitness_threshold_ = 0.5;
+        bool publish_aligned_cloud_ = false;
+        int max_points_before_gicp_ = 0;
         Eigen::Matrix4f gicp_init_guess_ = Eigen::Matrix4f::Identity();
         Eigen::Matrix<double, 4, 4> R_lidar_;
         Eigen::Matrix<double, 4, 4> icp_R_lidar_;  // 自适应缩放后的 R_lidar
