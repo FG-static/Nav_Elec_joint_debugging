@@ -153,4 +153,20 @@
         <origin xyz="0 0 0" rpy="0 0 0"/>
     </joint>
 
+    <!--livox lidar-->
+    <link name="livox_frame">
+        <visual>
+            <geometry>
+                <box size="0.06 0.06 0.03"/>
+            </geometry>
+            <material name="red"/>
+        </visual>
+    </link>
+
+    <joint name="livox_joint" type="fixed">
+        <parent link="base_link"/>
+        <child link="livox_frame"/>
+        <origin xyz="0 0 0.1" rpy="0 0 0"/>
+    </joint>
+
 </robot>

@@ -13,7 +13,7 @@ data_handle_node:
     # 值越大 → 越信任观测更新，响应更快但可能更抖
     eskf.Q_init: 0.005
     eskf.q_pose: 0.00005       # δp 过程噪声（位置），IMU 积分位置漂移速度
-    eskf.q_theta: 0.00001    # δθ 过程噪声（姿态），远小于 Q_init，压制 v_anti 的 heading 随机游走
+    eskf.q_theta: 0.000001    # δθ 过程噪声（姿态），远小于 Q_init，压制 v_anti 的 heading 随机游走
 
     # 零偏过程噪声（加速度计偏置 b_a、陀螺仪偏置 b_g）
     # 值越小 → 偏置漂移越慢（假设偏置稳定）
@@ -43,14 +43,18 @@ data_handle_node:
     eskf.alpha_lowpass_gyro: 0.5   # 陀螺仪（适度响应，捕捉刹车反向脉冲，防止转弯过头）
 
     # IESKF 迭代更新参数
-    eskf.iter_max: 5               # 迭代次数（1=标准KF单次更新；>1 对轮速观测过度校正，会发散）
+    eskf.iter_max: 1               # 迭代次数（1=标准KF单次更新；>1 对轮速观测过度校正，会发散）
     eskf.eps_dx: 0.0001            # 收敛阈值（弧度），||δx|| < eps 时停止迭代
 
     # 点云 ICP 观测参数
-    lidar.icp_leaf_size: 0.5         # 体素降采样边长 (m)，MID360 量程 ~40m，0.3 避免 int32 溢出
+    lidar.icp_leaf_size: 0.035        # 体素降采样边长 (m)，MID360 量程 ~40m，0.3 避免 int32 溢出
     lidar.icp_fitness_threshold: 2.0 # fitness_score > 此值则丢弃（配准失败）
-    lidar.r_lidar_v: 0.05            # ICP 速度观测噪声 (m/s)，越小越信任 ICP
-    lidar.r_lidar_w: 0.02            # ICP 角速度观测噪声 (rad/s)，越小越信任 ICP
+    lidar.process_interval: 0.2      # GICP 处理节流：至少间隔 0.2s 再处理一帧，避免 backlog
+    lidar.max_observation_dt: 0.35   # 超过该时间差的 ICP 结果只用于重同步，不送入滤波
+    lidar.r_lidar_vx: 0.0085           # ICP 前进速度观测噪声 (m/s)，越小越信任
+    lidar.r_lidar_vy: 0.01             # ICP 横向速度观测噪声，ICP 横向可观测性差，给大噪声
+    lidar.r_lidar_vz: 0.0025          # ICP 垂直速度观测噪声
+    lidar.r_lidar_wz: 0.02            # ICP yaw 角速度观测噪声 (rad/s)
     lidar.lidar_to_body_roll: 0.0    # 雷达系→车体系欧拉角 (rad)
     lidar.lidar_to_body_pitch: 0.0
     lidar.lidar_to_body_yaw: 3.14159265  # 方向反转 180°

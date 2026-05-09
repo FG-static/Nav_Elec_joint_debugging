@@ -174,10 +174,15 @@ namespace nav_data_handle {
 
         uint32_t last_lidar_t_ms_ = 0;
         rclcpp::Time lidar_start_time_;
+        rclcpp::Time last_lidar_processed_stamp_;
         double voxel_leaf_size_ = 0.05;
         double icp_fitness_threshold_ = 0.5;
+        double lidar_process_interval_ = 0.2;
+        double lidar_max_observation_dt_ = 0.35;
+        Eigen::Matrix4f gicp_init_guess_ = Eigen::Matrix4f::Identity();
         Eigen::Matrix<double, 4, 4> R_lidar_;
-        Eigen::Matrix3d R_lidar_to_body_;  // 雷达系 → 车体系旋转
+        Eigen::Matrix<double, 4, 4> icp_R_lidar_;  // 自适应缩放后的 R_lidar
+        Eigen::Matrix3d R_lidar_to_body_;           // 雷达系 → 车体系旋转
 
         // 零偏标定状态机
         enum class CalibState { CALIBRATING, RUNNING };
