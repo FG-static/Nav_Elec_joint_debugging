@@ -52,7 +52,7 @@ data_handle_node:
     lidar.r_lidar_vx: 0.0015           # ICP 前进速度观测噪声 (m/s)，越小越信任
     lidar.r_lidar_vy: 0.0015             # ICP 横向速度观测噪声，ICP 横向可观测性差，给大噪声
     lidar.r_lidar_vz: 0.0025          # ICP 垂直速度观测噪声
-    lidar.r_lidar_wz: 1.0            # ICP yaw 角速度观测噪声 (rad/s)
+    lidar.r_lidar_wz: 2.0            # ICP yaw 角速度观测噪声 (rad/s)
     lidar.publish_aligned_cloud: false # 是否发布 /gicp/aligned_cloud，诊断掉帧时建议关闭
     lidar.max_points_before_gicp: 0     # GICP 前最大点数，0=不限制；用于诊断降负载
     lidar.lidar_to_body_roll: 0.0    # 雷达系→车体系欧拉角 (rad)

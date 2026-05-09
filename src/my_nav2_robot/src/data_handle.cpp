@@ -1068,7 +1068,7 @@ namespace nav_data_handle {
 
         // 高角速度时重置 GICP 初始猜测为单位阵，避免上一帧错误配准传播
         if (gyro_filtered_.norm() > 1.5) {
-            gicp_init_guess_ = Eigen::Matrix4f::Identity();
+            //gicp_init_guess_ = Eigen::Matrix4f::Identity();
         }
 
         // GICP 在此线程执行（不阻塞 IMU 200Hz 回调）
@@ -1135,10 +1135,12 @@ namespace nav_data_handle {
                 // 合理性检查
                 double v_xy = v_icp.head<2>().norm();
                 if (v_xy > 2.0 || std::abs(w_icp.z()) > 2.0) {
+
                     RCLCPP_WARN_THROTTLE(
                         this->get_logger(), *this->get_clock(), 1000,
                         "ICP REJECTED: |v_xy|=%.3f wz=%.3f", v_xy, w_icp.z());
                 } else {
+
                     Eigen::Vector4d y;
                     y(0) = v_icp.x();
                     y(1) = v_icp.y();
@@ -1153,7 +1155,7 @@ namespace nav_data_handle {
 
                     std::lock_guard<std::mutex> lock(icp_result_mtx_);
                     icp_y_lidar_ = y;
-                    icp_R_lidar_ = R_lidar_ * scale_total;
+                    icp_R_lidar_ = R_lidar_;// * scale_total;
                     icp_result_ready_ = true;
                 }
             }
