@@ -19,13 +19,12 @@ public:
             "/livox/imu", rclcpp::SensorDataQoS(),
             [this](const sensor_msgs::msg::Imu::SharedPtr msg) {
 
-                // 用消息头时间戳计算相对毫秒时间戳，保证 rosbag 回放时 dt 仍然正确
-                const rclcpp::Time stamp(msg->header.stamp);
+                // 用 ROS 时钟计算相对毫秒时间戳（避免 header.stamp 溢出 uint32）
                 if (start_time_.nanoseconds() == 0) {
-                    start_time_ = stamp;
+                    start_time_ = this->now();
                 }
                 uint32_t t_ms = static_cast<uint32_t>(
-                    (stamp - start_time_).nanoseconds() / 1000000);
+                    (this->now() - start_time_).nanoseconds() / 1000000);
 
                 rm_interfaces::msg::Gimbal gimbal;
 

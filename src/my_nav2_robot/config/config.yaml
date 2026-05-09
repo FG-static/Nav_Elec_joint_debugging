@@ -49,8 +49,6 @@ data_handle_node:
     # 点云 ICP 观测参数
     lidar.icp_leaf_size: 0.035        # 体素降采样边长 (m)，MID360 量程 ~40m，0.3 避免 int32 溢出
     lidar.icp_fitness_threshold: 2.0 # fitness_score > 此值则丢弃（配准失败）
-    lidar.process_interval: 0.2      # GICP 处理节流：至少间隔 0.2s 再处理一帧，避免 backlog
-    lidar.max_observation_dt: 0.35   # 超过该时间差的 ICP 结果只用于重同步，不送入滤波
     lidar.r_lidar_vx: 0.0085           # ICP 前进速度观测噪声 (m/s)，越小越信任
     lidar.r_lidar_vy: 0.01             # ICP 横向速度观测噪声，ICP 横向可观测性差，给大噪声
     lidar.r_lidar_vz: 0.0025          # ICP 垂直速度观测噪声

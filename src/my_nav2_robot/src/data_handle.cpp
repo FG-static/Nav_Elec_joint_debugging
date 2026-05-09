@@ -171,16 +171,12 @@ namespace nav_data_handle {
         // 点云 ICP 观测参数
         this->declare_parameter("lidar.icp_leaf_size", 0.1);
         this->declare_parameter("lidar.icp_fitness_threshold", 0.5);
-        this->declare_parameter("lidar.process_interval", 0.2);
-        this->declare_parameter("lidar.max_observation_dt", 0.35);
         this->declare_parameter("lidar.r_lidar_vx", 0.05);
         this->declare_parameter("lidar.r_lidar_vy", 0.05);
         this->declare_parameter("lidar.r_lidar_vz", 0.05);
         this->declare_parameter("lidar.r_lidar_wz", 0.02);
         voxel_leaf_size_       = this->get_parameter("lidar.icp_leaf_size").as_double();
         icp_fitness_threshold_ = this->get_parameter("lidar.icp_fitness_threshold").as_double();
-        lidar_process_interval_ = this->get_parameter("lidar.process_interval").as_double();
-        lidar_max_observation_dt_ = this->get_parameter("lidar.max_observation_dt").as_double();
         R_lidar_ = Eigen::Matrix<double, 4, 4>::Zero();
         R_lidar_(0, 0) = this->get_parameter("lidar.r_lidar_vx").as_double();
         R_lidar_(1, 1) = this->get_parameter("lidar.r_lidar_vy").as_double();
@@ -608,15 +604,6 @@ namespace nav_data_handle {
             P_ * H.transpose() * S.inverse();
 
         // 更新误差状态
-        const Eigen::Vector4d innovation = y_obs - h_x;
-        RCLCPP_INFO_THROTTLE(
-            this->get_logger(), *this->get_clock(), 1000,
-            "VEL OBS: y=[%.3f %.3f %.3f %.3f] h=[%.3f %.3f %.3f %.3f] "
-            "innov=[%.3f %.3f %.3f %.3f] v_body=[%.3f %.3f %.3f]",
-            y_obs(0), y_obs(1), y_obs(2), y_obs(3),
-            h_x(0), h_x(1), h_x(2), h_x(3),
-            innovation(0), innovation(1), innovation(2), innovation(3),
-            v_body.x(), v_body.y(), v_body.z());
         delta_x_ += Kk * (y_obs - h_x);
 
         // Joseph 形式更新协方差
@@ -1019,19 +1006,6 @@ namespace nav_data_handle {
         const sensor_msgs::msg::PointCloud2::SharedPtr msg
     ) {
 
-        const rclcpp::Time stamp(msg->header.stamp);
-
-        // 若点云输入频率高于 GICP 可承受范围，优先快速跳过部分帧来追上最新数据。
-        // 这比在 backlog 上硬算每一帧更稳，因为后者会把 lidar_dt 拉大并污染速度观测。
-        if (last_lidar_processed_stamp_.nanoseconds() != 0) {
-            double since_last_processed =
-                (stamp - last_lidar_processed_stamp_).seconds();
-            if (since_last_processed < lidar_process_interval_) {
-                return;
-            }
-        }
-        last_lidar_processed_stamp_ = stamp;
-
         // 将 ROS 点云转为 PCL 格式，移除 NaN/Inf
         auto raw = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         pcl::fromROSMsg(*msg, *raw);
@@ -1046,12 +1020,12 @@ namespace nav_data_handle {
                 cb_cnt, raw->size(), cloud->size());
         }
 
-        // 用点云消息头时间戳计算相对时间，避免 rosbag 回放和 GICP 耗时污染 dt
+        // 相对时间戳
         if (lidar_start_time_.nanoseconds() == 0) {
-            lidar_start_time_ = stamp;
+            lidar_start_time_ = this->now();
         }
         uint32_t t_ms = static_cast<uint32_t>(
-            (stamp - lidar_start_time_).nanoseconds() / 1000000);
+            (this->now() - lidar_start_time_).nanoseconds() / 1000000);
 
         // 高角速度时重置 GICP 初始猜测为单位阵，避免上一帧错误配准传播
         if (gyro_filtered_.norm() > 1.5) {
@@ -1079,17 +1053,6 @@ namespace nav_data_handle {
                 "ICP RESULT: score=%.4f thresh=%.4f dt=%.3f pts=%zu",
                 score, icp_fitness_threshold_, lidar_dt, cloud->size());
 
-            if (lidar_dt > lidar_max_observation_dt_) {
-                RCLCPP_WARN_THROTTLE(
-                    this->get_logger(), *this->get_clock(), 1000,
-                    "ICP RESYNC: lidar_dt=%.3f exceeds max_observation_dt=%.3f, drop observation",
-                    lidar_dt, lidar_max_observation_dt_);
-                prev_cloud_ = cloud;
-                last_lidar_t_ms_ = t_ms;
-                gicp_init_guess_ = Eigen::Matrix4f::Identity();
-                return;
-            }
-
             if (score < icp_fitness_threshold_ &&
                 lidar_dt > 0.01 && lidar_dt < 1.0) {
 
@@ -1116,15 +1079,6 @@ namespace nav_data_handle {
                     y(1) = v_icp.y();
                     y(2) = 0.0;
                     y(3) = w_icp.z();
-
-                    RCLCPP_INFO_THROTTLE(
-                        this->get_logger(), *this->get_clock(), 1000,
-                        "ICP OK: dt=%.3f t=[%.3f %.3f %.3f] v=[%.3f %.3f %.3f] wz=%.3f "
-                        "guess_t=[%.3f %.3f %.3f]",
-                        lidar_dt,
-                        t.x(), t.y(), t.z(),
-                        v_icp.x(), v_icp.y(), v_icp.z(), w_icp.z(),
-                        gicp_init_guess_(0, 3), gicp_init_guess_(1, 3), gicp_init_guess_(2, 3));
 
                     // 自适应 R_lidar：快速旋转 + 差配准 → 增大 R 降低 ICP 信任
                     double gyro_norm = gyro_filtered_.norm();
