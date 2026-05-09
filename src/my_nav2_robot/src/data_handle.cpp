@@ -5,7 +5,7 @@ namespace nav_data_handle {
     NavDataHandle::NavDataHandle() : rclcpp::Node("DataHandleNode") {
 
         gimbal_sub_ = this->create_subscription<rm_interfaces::msg::Gimbal>(
-            "/tracker/gimbal", rclcpp::SensorDataQoS(),
+            "/tracker/gimbal", rclcpp::QoS(1).best_effort(),
             [this](const rm_interfaces::msg::Gimbal::SharedPtr msg) {
                 gimbalCallBack(msg);
             }
@@ -1022,6 +1022,11 @@ namespace nav_data_handle {
         const sensor_msgs::msg::PointCloud2::SharedPtr msg
     ) {
 
+        // 防积压：上次 GICP 还没完成，丢弃当前帧
+        if (gicp_running_.exchange(true)) {
+            return;
+        }
+
         // 将 ROS 点云转为 PCL 格式，移除 NaN/Inf
         auto raw = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         pcl::fromROSMsg(*msg, *raw);
@@ -1164,6 +1169,8 @@ namespace nav_data_handle {
         prev_cloud_ = cloud_for_gicp;
         last_lidar_stamp_ns_ = lidar_stamp_ns;
         last_lidar_wall_ns_ = wall_stamp_ns;
+
+        gicp_running_ = false;  // GICP 处理完成，允许接收下一帧
     }
 
 } // nav_data_handle

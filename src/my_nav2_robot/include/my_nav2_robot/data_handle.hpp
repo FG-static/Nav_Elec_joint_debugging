@@ -18,6 +18,7 @@
 #include <string>
 #include <fstream>
 #include <mutex>
+#include <atomic>
 #include "sensor_msgs/msg/point_cloud2.hpp"
 
 #include <pcl-1.14/pcl/point_cloud.h> // 点云基础类型
@@ -168,6 +169,7 @@ namespace nav_data_handle {
         );
         rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub_;
         pcl::PointCloud<pcl::PointXYZ>::Ptr prev_cloud_;
+        std::atomic<bool> gicp_running_{false};  // 防积压：GICP 还在跑时跳过新帧
 
         // ICP 结果缓冲（lidarCallback 计算，iteratedObserve 消费）
         std::mutex icp_result_mtx_;

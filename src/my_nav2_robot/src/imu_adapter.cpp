@@ -13,7 +13,7 @@ public:
     ImuAdapter() : Node("imu_adapter_node") {
 
         gimbal_pub_ = this->create_publisher<rm_interfaces::msg::Gimbal>(
-            "/tracker/gimbal", 10);
+            "/tracker/gimbal", rclcpp::QoS(1));
 
         imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
             "/livox/imu", rclcpp::SensorDataQoS(),
