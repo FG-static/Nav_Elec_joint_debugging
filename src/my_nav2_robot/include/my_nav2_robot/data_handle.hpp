@@ -122,6 +122,8 @@ namespace nav_data_handle {
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gyro_compensated_pub_;
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr wheel_vel_raw_pub_;
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr wheel_vel_filtered_pub_;
+        rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gicp_vel_pub_;
+        rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gicp_innovation_pub_;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr aligned_cloud_pub_;
         std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     
@@ -161,6 +163,8 @@ namespace nav_data_handle {
         void lidarCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
         void observeVelocity(
             const Eigen::Vector4d &y_obs, const Eigen::Matrix<double, 4, 4> &R_obs);
+        void observeYaw(
+            double delta_yaw_icp, const Eigen::Quaterniond &q_lidar_ref, double R_yaw);
         Eigen::Matrix4d estimate_motion_with_gicp(
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &source_cloud,
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &target_cloud,
@@ -175,13 +179,19 @@ namespace nav_data_handle {
         std::mutex icp_result_mtx_;
         bool icp_result_ready_ = false;
         Eigen::Vector4d icp_y_lidar_ = Eigen::Vector4d::Zero();
+        double icp_delta_yaw_ = 0.0;
+        Eigen::Quaterniond icp_yaw_ref_q_ = Eigen::Quaterniond::Identity();
+        bool icp_yaw_ready_ = false;
 
         int64_t last_lidar_stamp_ns_ = 0;
         int64_t last_lidar_wall_ns_ = 0;
+        Eigen::Quaterniond prev_lidar_q_ = Eigen::Quaterniond::Identity();
+        bool prev_lidar_q_ready_ = false;
         double voxel_leaf_size_ = 0.05;
         double icp_fitness_threshold_ = 0.5;
         bool publish_aligned_cloud_ = false;
         int max_points_before_gicp_ = 0;
+        double r_lidar_yaw_delta_ = 0.05;
         Eigen::Matrix4f gicp_init_guess_ = Eigen::Matrix4f::Identity();
         Eigen::Matrix<double, 4, 4> R_lidar_;
         Eigen::Matrix<double, 4, 4> icp_R_lidar_;  // 自适应缩放后的 R_lidar

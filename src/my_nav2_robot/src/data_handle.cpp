@@ -52,6 +52,12 @@ namespace nav_data_handle {
         wheel_vel_filtered_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
             "/wheel_vel/filtered", 10
         );
+        gicp_vel_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
+            "/gicp/vel_body", 10
+        );
+        gicp_innovation_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
+            "/gicp/innovation_body", 10
+        );
         aligned_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
             "/gicp/aligned_cloud", 20
         );
@@ -178,10 +184,12 @@ namespace nav_data_handle {
         this->declare_parameter("lidar.r_lidar_vy", 0.05);
         this->declare_parameter("lidar.r_lidar_vz", 0.05);
         this->declare_parameter("lidar.r_lidar_wz", 0.02);
+        this->declare_parameter("lidar.r_lidar_yaw_delta", 0.05);
         this->declare_parameter("lidar.publish_aligned_cloud", false);
         this->declare_parameter("lidar.max_points_before_gicp", 0);
         voxel_leaf_size_       = this->get_parameter("lidar.icp_leaf_size").as_double();
         icp_fitness_threshold_ = this->get_parameter("lidar.icp_fitness_threshold").as_double();
+        r_lidar_yaw_delta_ = this->get_parameter("lidar.r_lidar_yaw_delta").as_double();
         publish_aligned_cloud_ = this->get_parameter("lidar.publish_aligned_cloud").as_bool();
         max_points_before_gicp_ = this->get_parameter("lidar.max_points_before_gicp").as_int();
         if (max_points_before_gicp_ < 0) {
@@ -628,6 +636,51 @@ namespace nav_data_handle {
              Kk * R_obs * Kk.transpose();
     }
 
+    void NavDataHandle::observeYaw(
+        double delta_yaw_icp, const Eigen::Quaterniond &q_lidar_ref, double R_yaw
+    ) {
+
+        // 1 维观测：ICP 帧间 yaw 变化量 Δψ_icp（车体系）
+        // 预测值：上一帧 lidar 参考姿态到当前迭代状态 q_ 的 yaw 变化量。
+        // 这样观测与 GICP 的时间跨度一致，而不是使用本次 IMU predict 内部增量。
+
+        // yaw = atan2(2(qw*qz + qx*qy), 1 - 2(qy² + qz²))
+        auto extractYaw = [](const Eigen::Quaterniond &q) -> double {
+            return std::atan2(
+                2.0 * (q.w() * q.z() + q.x() * q.y()),
+                1.0 - 2.0 * (q.y() * q.y() + q.z() * q.z()));
+        };
+
+        double yaw_cur = extractYaw(q_);
+        double yaw_ref = extractYaw(q_lidar_ref);
+        double delta_yaw_pred = yaw_cur - yaw_ref;
+
+        // 角度归一化到 [-π, π]
+        while (delta_yaw_pred - delta_yaw_icp > M_PI) delta_yaw_pred -= 2.0 * M_PI;
+        while (delta_yaw_pred - delta_yaw_icp < -M_PI) delta_yaw_pred += 2.0 * M_PI;
+
+        // 观测残差
+        double innovation = delta_yaw_icp - delta_yaw_pred;
+
+        // 雅可比 H (1×15)
+        Eigen::Matrix<double, 1, 15> H = Eigen::Matrix<double, 1, 15>::Zero();
+        H(0, 8) = 1.0;  // δθ_z
+
+        // 卡尔曼增益
+        double S_val = (H * P_ * H.transpose())(0, 0) + R_yaw;
+        Eigen::Matrix<double, 15, 1> Kk = P_ * H.transpose() * (1.0 / S_val);
+
+        // 更新误差状态
+        delta_x_ += Kk * innovation;
+
+        // Joseph 形式更新协方差
+        Eigen::Matrix<double, 15, 15> I15 =
+            Eigen::Matrix<double, 15, 15>::Identity();
+        P_ = (I15 - Kk * H) * P_ *
+             (I15 - Kk * H).transpose() +
+             Kk * R_yaw * Kk.transpose();
+    }
+
     void NavDataHandle::observeZeroTilt() {
 
         // 地面机器人约束：pitch ≈ 0, roll ≈ 0
@@ -770,14 +823,21 @@ namespace nav_data_handle {
         // 消费 lidarCallback 异步计算的 ICP 结果
         Eigen::Vector4d y_lidar = Eigen::Vector4d::Zero();
         Eigen::Matrix<double, 4, 4> R_lidar_scaled = R_lidar_;
+        double delta_yaw_icp = 0.0;
+        Eigen::Quaterniond yaw_ref_q = Eigen::Quaterniond::Identity();
         bool use_lidar = false;
+        bool use_lidar_yaw = false;
         {
             std::lock_guard<std::mutex> lock(icp_result_mtx_);
             if (icp_result_ready_) {
                 y_lidar = icp_y_lidar_;
                 R_lidar_scaled = icp_R_lidar_;
+                delta_yaw_icp = icp_delta_yaw_;
+                yaw_ref_q = icp_yaw_ref_q_;
                 use_lidar = true;
+                use_lidar_yaw = icp_yaw_ready_;
                 icp_result_ready_ = false;
+                icp_yaw_ready_ = false;
             }
         }
 
@@ -800,6 +860,10 @@ namespace nav_data_handle {
                 observeVelocity(y_lidar, R_lidar_scaled);
             }
             observeZeroTilt();
+            if (use_lidar_yaw) {
+                // ICP Δyaw 约束相邻 lidar 姿态间的 yaw 变化，避免时间跨度不一致。
+                observeYaw(delta_yaw_icp, yaw_ref_q, r_lidar_yaw_delta_);
+            }
 
             // 累积本轮 δx
             dx_accum += delta_x_;
@@ -1137,6 +1201,32 @@ namespace nav_data_handle {
                 v_icp = R_lidar_to_body_ * v_icp;
                 w_icp = R_lidar_to_body_ * w_icp;
 
+                // 提取 ICP yaw 变化量（车体系），用于直接观测 yaw 角
+                Eigen::Matrix3d R_icp_body = R_lidar_to_body_ * R_icp * R_lidar_to_body_.transpose();
+                double delta_yaw_icp = std::atan2(R_icp_body(1, 0), R_icp_body(0, 0));
+
+                Eigen::Vector3d v_body_pred = q_.toRotationMatrix().transpose() * v_;
+                Eigen::Vector3d innovation = v_icp - v_body_pred;
+
+                geometry_msgs::msg::Vector3 gicp_vel_msg;
+                gicp_vel_msg.x = v_icp.x();
+                gicp_vel_msg.y = v_icp.y();
+                gicp_vel_msg.z = w_icp.z();
+                gicp_vel_pub_->publish(gicp_vel_msg);
+
+                geometry_msgs::msg::Vector3 innovation_msg;
+                innovation_msg.x = innovation.x();
+                innovation_msg.y = innovation.y();
+                innovation_msg.z = v_body_pred.y();
+                gicp_innovation_pub_->publish(innovation_msg);
+
+                RCLCPP_INFO_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 500,
+                    "GICP OBS: v_icp=[%.3f %.3f] v_pred=[%.3f %.3f] "
+                    "innov=[%.3f %.3f] wz=%.3f score=%.3f",
+                    v_icp.x(), v_icp.y(), v_body_pred.x(), v_body_pred.y(),
+                    innovation.x(), innovation.y(), w_icp.z(), score);
+
                 // 合理性检查
                 double v_xy = v_icp.head<2>().norm();
                 if (v_xy > 2.0 || std::abs(w_icp.z()) > 2.0) {
@@ -1161,12 +1251,17 @@ namespace nav_data_handle {
                     std::lock_guard<std::mutex> lock(icp_result_mtx_);
                     icp_y_lidar_ = y;
                     icp_R_lidar_ = R_lidar_;// * scale_total;
+                    icp_delta_yaw_ = delta_yaw_icp;
+                    icp_yaw_ref_q_ = prev_lidar_q_;
+                    icp_yaw_ready_ = prev_lidar_q_ready_;
                     icp_result_ready_ = true;
                 }
             }
         }
 
         prev_cloud_ = cloud_for_gicp;
+        prev_lidar_q_ = q_.normalized();
+        prev_lidar_q_ready_ = true;
         last_lidar_stamp_ns_ = lidar_stamp_ns;
         last_lidar_wall_ns_ = wall_stamp_ns;
 

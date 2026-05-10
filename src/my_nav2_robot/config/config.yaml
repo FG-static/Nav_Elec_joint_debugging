@@ -47,12 +47,13 @@ data_handle_node:
     eskf.eps_dx: 0.0001            # 收敛阈值（弧度），||δx|| < eps 时停止迭代
 
     # 点云 ICP 观测参数
-    lidar.icp_leaf_size: 0.035        # 体素降采样边长 (m)，MID360 量程 ~40m，0.3 避免 int32 溢出
+    lidar.icp_leaf_size: 0.03        # 体素降采样边长 (m)，MID360 量程 ~40m，0.3 避免 int32 溢出
     lidar.icp_fitness_threshold: 2.0 # fitness_score > 此值则丢弃（配准失败）
-    lidar.r_lidar_vx: 0.0015           # ICP 前进速度观测噪声 (m/s)，越小越信任
-    lidar.r_lidar_vy: 0.0015             # ICP 横向速度观测噪声，ICP 横向可观测性差，给大噪声
+    lidar.r_lidar_vx: 0.01           # ICP 前进速度观测噪声 (m/s)，越小越信任
+    lidar.r_lidar_vy: 0.01             # ICP 横向速度观测噪声，ICP 横向可观测性差，给大噪声
     lidar.r_lidar_vz: 0.0025          # ICP 垂直速度观测噪声
-    lidar.r_lidar_wz: 2.0            # ICP yaw 角速度观测噪声 (rad/s)
+    lidar.r_lidar_wz: 5.0            # ICP yaw 角速度观测噪声 (rad/s)
+    lidar.r_lidar_yaw_delta: 0.05     # ICP 帧间 yaw 增量观测噪声，先保守，稳定后可减小
     lidar.publish_aligned_cloud: false # 是否发布 /gicp/aligned_cloud，诊断掉帧时建议关闭
     lidar.max_points_before_gicp: 0     # GICP 前最大点数，0=不限制；用于诊断降负载
     lidar.lidar_to_body_roll: 0.0    # 雷达系→车体系欧拉角 (rad)

@@ -19,20 +19,13 @@ public:
             "/livox/imu", rclcpp::SensorDataQoS(),
             [this](const sensor_msgs::msg::Imu::SharedPtr msg) {
 
-                // 用 ROS 时钟计算相对毫秒时间戳（避免 header.stamp 溢出 uint32）
-                if (start_time_.nanoseconds() == 0) {
-                    start_time_ = this->now();
-                }
-                uint32_t t_ms = static_cast<uint32_t>(
-                    (this->now() - start_time_).nanoseconds() / 1000000);
-
                 rm_interfaces::msg::Gimbal gimbal;
 
                 // 头部时间戳
                 gimbal.header = msg->header;
 
-                // MCU 时间戳：ROS 相对时间（单调递增，无溢出）
-                gimbal.t_ms = t_ms;
+                // MCU 时间戳：使用 IMU 采样时间的相对毫秒，避免 rosbag 回放调度影响 dt
+                gimbal.t_ms = make_t_ms(msg);
 
                 // IMU 角速度 → Gimbal.angular_velocity
                 gimbal.angular_velocity.x = msg->angular_velocity.x;
@@ -61,9 +54,60 @@ public:
 
 private:
 
+    uint32_t make_t_ms(const sensor_msgs::msg::Imu::SharedPtr &msg)
+    {
+
+        const bool has_valid_header_stamp =
+            msg->header.stamp.sec != 0 || msg->header.stamp.nanosec != 0;
+
+        rclcpp::Time current_stamp = has_valid_header_stamp ?
+            rclcpp::Time(msg->header.stamp) : this->now();
+
+        if (!has_valid_header_stamp) {
+
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 5000,
+                "/livox/imu header.stamp 无效，退回使用节点当前时间生成 Gimbal.t_ms");
+        }
+
+        if (!start_stamp_initialized_) {
+
+            start_stamp_ = current_stamp;
+            start_stamp_initialized_ = true;
+            last_t_ms_ = 0;
+            return last_t_ms_;
+        }
+
+        // 只使用原始纳秒差，避免 header.stamp 与节点 clock_type 不一致时抛异常
+        const int64_t elapsed_ns = current_stamp.nanoseconds() - start_stamp_.nanoseconds();
+        if (elapsed_ns < 0) {
+
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 5000,
+                "/livox/imu header.stamp 早于起始时间，保持上一帧 Gimbal.t_ms=%u",
+                last_t_ms_);
+            return last_t_ms_;
+        }
+
+        const uint32_t t_ms = static_cast<uint32_t>(elapsed_ns / 1000000);
+        if (t_ms < last_t_ms_) {
+
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 5000,
+                "/livox/imu header.stamp 倒退，保持上一帧 Gimbal.t_ms=%u",
+                last_t_ms_);
+            return last_t_ms_;
+        }
+
+        last_t_ms_ = t_ms;
+        return last_t_ms_;
+    }
+
     rclcpp::Publisher<rm_interfaces::msg::Gimbal>::SharedPtr gimbal_pub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
-    rclcpp::Time start_time_;
+    rclcpp::Time start_stamp_;
+    uint32_t last_t_ms_ = 0;
+    bool start_stamp_initialized_ = false;
 };
 
 int main(int argc, char** argv) {
