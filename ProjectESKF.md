@@ -984,3 +984,235 @@ $$\hat{\boldsymbol{g}} \oplus \delta\boldsymbol{\xi} = \exp(\boldsymbol{B}_x \de
 
 - **信任分配**：需要平衡"雷达位姿"与"轮速计速度"的信任权重。
 - **动态调整**：考虑根据 GICP 的 fitness_score 动态调整 $R_{lidar}$，防止雷达在退化环境（如窄长廊）中带偏系统。
+
+---
+
+## 十四、近期工程化修复记录
+
+本节记录近期围绕 `src/my_nav2_robot/src/data_handle.cpp` 和 `src/my_nav2_robot/src/imu_adapter.cpp` 的工程化修复。目标不是修改 ESKF 基本数学模型，而是修正**时间基准、点云刚体假设、回调调度方式、yaw 观测时间一致性**四类实现偏差。
+
+### 14.1 IMU 时间戳与 dt 计算修复
+
+#### 14.1.1 问题背景
+
+`data_handle` 的 predict 依赖 IMU 帧间隔 $\Delta t$。若 $\Delta t$ 使用 ROS 当前时间 `this->now()` 计算，在 rosbag 回放、CPU 卡顿、暂停恢复时会引入调度层抖动，导致：
+
+1. IMU 积分步长被回放节奏污染
+2. `dt` 偶发突增，predict 误差放大
+3. ESKF 将回放器抖动误认为真实传感器采样间隔变化
+
+#### 14.1.2 修复方案
+
+在 `imu_adapter_node` 中，不再使用节点当前时间生成 `Gimbal.t_ms`，而是改用 `/livox/imu.header.stamp` 的相对时间：
+
+$$t_{ms}(k) = \frac{stamp_{imu}(k) - stamp_{imu}(0)}{10^6}$$
+
+其中：
+- `stamp_imu(0)`：首帧有效 IMU header 时间
+- `stamp_imu(k)`：第 $k$ 帧 IMU 的 ROS 时间戳
+
+同时加入两条保护：
+
+1. 若 `header.stamp` 无效，则退回 `this->now()` 并节流告警
+2. 若时间戳回退，则保持 `t_ms` 单调，避免 `data_handle` 看到负 `dt`
+
+#### 14.1.3 设计理由
+
+`header.stamp` 代表**传感器采样时间**，而 `this->now()` 代表**节点处理时间**。ESKF 的物理积分必须依赖采样时间，而不是处理时间。
+
+因此，`data_handle` 中的
+
+$$\Delta t = \frac{t_{ms}(k) - t_{ms}(k-1)}{1000}$$
+
+应严格对应 IMU 真实采样间隔，而不应受到 ROS 调度和回放器行为影响。
+
+### 14.2 点云运动畸变修复
+
+#### 14.2.1 问题背景
+
+MID360 的 `/livox/lidar/pointcloud` 一帧扫描持续约 `100ms`。若车辆在这 `100ms` 内发生旋转，则该帧点云不是单一刚体姿态下的观测，而是：
+
+$$\mathcal{P} = \{ \mathbf{p}(t_i) \mid t_i \in [t_{start}, t_{end}] \}$$
+
+原实现将整帧点云直接转为 `pcl::PointXYZ` 并送入 GICP，相当于假设：
+
+$$\mathbf{T}(t_i) = \mathbf{T}(t_{ref}), \quad \forall i$$
+
+该假设在静止时近似成立，但在转弯或轻微 yaw 抖动时会失效，表现为：
+
+1. 直走时 GICP 逐渐给出虚假偏航
+2. 转弯时 GICP 旋转量偏小或偏斜
+3. 调高 IMU 权重会“转不到位”，调高 GICP 权重又会“直走倾斜”
+
+#### 14.2.2 每点时间解析
+
+修复后的 `parseLidarFrame()` 会手动解析 `PointCloud2` 字段，而不再直接用 `pcl::fromROSMsg`。原因是原始点云中包含每点 `timestamp` 字段，直接转 `PointXYZ` 会丢失该信息。
+
+对第 $i$ 个点，读取：
+
+$$\mathbf{p}_i = [x_i, y_i, z_i]^T, \quad t_i = timestamp_i$$
+
+并统计整帧时间范围：
+
+$$t_{min} = \min_i t_i, \quad t_{max} = \max_i t_i$$
+
+本工程中选取参考时刻：
+
+$$t_{ref} = t_{max}$$
+
+即将整帧点云 deskew 到扫描末端时刻。
+
+#### 14.2.3 状态历史与时间插值
+
+为支持 deskew，系统维护 ESKF 状态历史：
+
+$$\mathcal{H} = \{ (t_k, \mathbf{p}_k, \mathbf{q}_k) \}$$
+
+其中每个元素来自 IMU 回调结束后的融合状态，而非 GICP 单独解算结果。
+
+给定任意点时间 $t_i$，用 `interpolateState()` 从历史中求出：
+
+$$\mathbf{p}(t_i), \mathbf{q}(t_i)$$
+
+位置采用线性插值，姿态采用四元数球面插值 `slerp`：
+
+$$\mathbf{p}(t) = (1 - \alpha)\mathbf{p}_a + \alpha\mathbf{p}_b$$
+
+$$\mathbf{q}(t) = \operatorname{slerp}(\mathbf{q}_a, \mathbf{q}_b, \alpha)$$
+
+其中：
+
+$$\alpha = \frac{t - t_a}{t_b - t_a}$$
+
+对 LiDAR 实时回调早于 IMU 缓存末端的情况，允许最多 `150ms` 的小外推，以覆盖扫描末端时刻。
+
+#### 14.2.4 旋转 deskew 实现
+
+当前默认只启用**旋转去畸变**，不启用平移去畸变。原因是短时姿态由陀螺积分提供，精度通常高于短时位置积分；若直接引入平移补偿，误差更容易由加速度噪声放大。
+
+对每个点：
+
+1. 点先从 LiDAR 系转到车体系
+
+$$\mathbf{p}_i^{body} = \mathbf{R}_{lidar}^{body}\mathbf{p}_i^{lidar}$$
+
+2. 用采样时刻姿态转到世界系
+
+$$\mathbf{p}_i^{world} = \mathbf{R}(\mathbf{q}(t_i))\mathbf{p}_i^{body}$$
+
+3. 再用参考时刻姿态转回参考车体系
+
+$$\mathbf{p}_{i \rightarrow ref}^{body} = \mathbf{R}(\mathbf{q}(t_{ref}))^T \mathbf{p}_i^{world}$$
+
+4. 最后转回参考 LiDAR 系
+
+$$\mathbf{p}_{i \rightarrow ref}^{lidar} = (\mathbf{R}_{lidar}^{body})^T \mathbf{p}_{i \rightarrow ref}^{body}$$
+
+于是整帧点云被统一到同一参考姿态下，恢复 GICP 所要求的“单刚体帧”近似。
+
+#### 14.2.5 设计理由
+
+GICP 的前提是源点云与目标点云分别来自两个刚体位姿。deskew 的作用不是替代 GICP，而是恢复这一前提。
+
+换言之，deskew 解决的是“一帧内部不一致”，GICP 解决的是“两帧之间怎么变换”。
+
+### 14.3 双线程与防积压修复
+
+#### 14.3.1 问题背景
+
+IMU 频率约 `200Hz`，LiDAR 频率约 `10Hz`，而 GICP 单次配准耗时可达 `30ms~50ms`。若 IMU 回调与 LiDAR/GICP 共用单线程执行器，则：
+
+1. GICP 会阻塞 IMU 回调
+2. IMU `dt` 被人为拉大
+3. P 矩阵传播与姿态积分出现额外误差
+
+#### 14.3.2 修复方案
+
+1. LiDAR 订阅放入独立回调组
+2. 使用 `MultiThreadedExecutor(2)` 让 IMU 与 LiDAR 并行执行
+3. 加入防积压原子标志：
+
+```cpp
+if (gicp_running_.exchange(true)) {
+    return;
+}
+```
+
+语义为：若上一帧 GICP 尚未完成，则直接丢弃当前 LiDAR 帧，不允许 GICP 排队。
+
+#### 14.3.3 设计理由
+
+本系统里 IMU 是主时钟，LiDAR 是低频观测。若必须二选一，应优先保证 IMU predict 的连续性，而不是强行处理所有 LiDAR 帧。
+
+因此，策略不是“排队等待所有 GICP 都算完”，而是“宁可丢 LiDAR 帧，也不要让 IMU 积分失真”。
+
+### 14.4 GICP 时间基准与初值修复
+
+#### 14.4.1 LiDAR 帧间隔
+
+原始 GICP 观测若用 wall time 或回调触发时间算帧间隔，会受到调度、CPU 抢占、回放节奏影响。修复后统一使用点云时间戳：
+
+$$\Delta t_{lidar} = t_{ref}(k) - t_{ref}(k-1)$$
+
+其中 `t_ref = max_point_stamp_ns`。
+
+这样 `v_icp` 与 `w_icp` 表示的就是传感器真实帧间速度，而不是 ROS 执行器观察到的回调间隔速度。
+
+#### 14.4.2 GICP 初值
+
+GICP 不再盲目复用上一帧配准结果，而是用 ESKF 历史估计相邻两帧 LiDAR 的先验相对运动：
+
+$$\mathbf{T}_{source \rightarrow target}^{pred} = \mathbf{T}_{lidar}(t_{k-1})^{-1}\mathbf{T}_{lidar}(t_k)$$
+
+这一步由 `estimateLidarMotion()` 生成，并写入 `gicp_init_guess_`。
+
+#### 14.4.3 设计理由
+
+GICP 初值越接近真实解，越不容易在弱纹理或转弯时收敛到错误局部极值。ESKF 负责给出近似先验，GICP 再用几何结构细化。
+
+### 14.5 observeYaw 的时间一致性修复
+
+#### 14.5.1 原问题
+
+GICP 的 yaw 观测本质上是相邻 LiDAR 参考时刻之间的偏航变化：
+
+$$\Delta \psi_{icp} = \psi(t_k) - \psi(t_{k-1})$$
+
+若在 IMU 当前回调时直接用“当前 `q_` 减上一帧 LiDAR 姿态”构造残差，则观测时间跨度变成：
+
+$$[t_{k-1}, t_{imu,now}]$$
+
+而不是 GICP 实际对应的：
+
+$$[t_{k-1}, t_k]$$
+
+这会引入时间基准不一致，尤其在 IMU 高频、LiDAR 低频时更明显。
+
+#### 14.5.2 修复方案
+
+在 LiDAR 回调中，先用相同的两帧 LiDAR 参考时刻，从状态历史中取出姿态并计算预测 yaw 变化：
+
+$$\Delta \psi_{pred} = \psi_{eskf}(t_k) - \psi_{eskf}(t_{k-1})$$
+
+再构造 yaw 残差：
+
+$$r_{\psi} = \Delta \psi_{icp} - \Delta \psi_{pred}$$
+
+并将该残差缓存到 `icp_yaw_innovation_`。后续 IMU 回调中的 `iteratedObserve()` 不再重新推导时间跨度，而是直接消费这个已时间对齐的残差。
+
+#### 14.5.3 设计理由
+
+GICP 是“帧间观测”，不是“当前时刻绝对姿态观测”。因此，yaw 更新必须在与 GICP 完全相同的时间区间上构造残差，否则观测模型与观测数据不匹配。
+
+这次修复的本质是把 `observeYaw` 从“当前 IMU 时刻修正”改成了“LiDAR 帧间残差修正”。
+
+### 14.6 工程结论
+
+这几次修复没有改变 ESKF 的基础状态定义与 predict/update 主框架，但修正了四类工程实现问题：
+
+1. **IMU dt 必须来自传感器时间戳，而非 ROS 调度时间**
+2. **LiDAR 点云必须先 deskew，才能满足 GICP 的刚体假设**
+3. **IMU 与 GICP 必须线程隔离，并通过防积压避免低频重任务拖坏高频积分**
+4. **yaw 观测必须用 LiDAR 帧间时间构造残差，不能和当前 IMU 时刻混用**
+
+这些修复的共同目标是：让滤波器处理的每一类量都对应其真实物理时间与几何意义，而不是把 ROS 执行器行为、回放节奏或一帧点云内部的扫描过程误当成机器人本体运动。

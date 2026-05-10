@@ -1,5 +1,9 @@
 #include "my_nav2_robot/data_handle.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+
 namespace nav_data_handle {
 
     NavDataHandle::NavDataHandle() : rclcpp::Node("DataHandleNode") {
@@ -187,11 +191,25 @@ namespace nav_data_handle {
         this->declare_parameter("lidar.r_lidar_yaw_delta", 0.05);
         this->declare_parameter("lidar.publish_aligned_cloud", false);
         this->declare_parameter("lidar.max_points_before_gicp", 0);
+        this->declare_parameter("lidar.enable_deskew", true);
+        this->declare_parameter("lidar.deskew_translation", false);
+        this->declare_parameter("lidar.state_history_duration", 3.0);
         voxel_leaf_size_       = this->get_parameter("lidar.icp_leaf_size").as_double();
         icp_fitness_threshold_ = this->get_parameter("lidar.icp_fitness_threshold").as_double();
         r_lidar_yaw_delta_ = this->get_parameter("lidar.r_lidar_yaw_delta").as_double();
         publish_aligned_cloud_ = this->get_parameter("lidar.publish_aligned_cloud").as_bool();
         max_points_before_gicp_ = this->get_parameter("lidar.max_points_before_gicp").as_int();
+        enable_lidar_deskew_ = this->get_parameter("lidar.enable_deskew").as_bool();
+        deskew_translation_ = this->get_parameter("lidar.deskew_translation").as_bool();
+        state_history_duration_ =
+            this->get_parameter("lidar.state_history_duration").as_double();
+        if (state_history_duration_ < 1.0) {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "lidar.state_history_duration=%.2f 过短，已按 1.0s 处理",
+                state_history_duration_);
+            state_history_duration_ = 1.0;
+        }
         if (max_points_before_gicp_ < 0) {
             RCLCPP_WARN(
                 this->get_logger(),
@@ -224,10 +242,12 @@ namespace nav_data_handle {
         RCLCPP_INFO(
             this->get_logger(),
             "ESKF 参数已加载: P=%.6f, Q=%.6f, Q_bias=[%.8f %.8f], "
-            "R=[%.6f %.6f %.6f %.6f], R_tilt=[%.6f %.6f], calibration=%.2fs",
+            "R=[%.6f %.6f %.6f %.6f], R_tilt=[%.6f %.6f], calibration=%.2fs, "
+            "deskew=%d translation=%d",
             P_init, Q_init, q_b_a, q_b_g,
             r_11, r_22, r_33, r_44,
-            r_tilt_11, r_tilt_22, calibration_duration_);
+            r_tilt_11, r_tilt_22, calibration_duration_,
+            enable_lidar_deskew_, deskew_translation_);
     }
 
     void NavDataHandle::gimbalCallBack(
@@ -321,6 +341,7 @@ namespace nav_data_handle {
 
                 calib_state_ = CalibState::RUNNING;
                 last_t_ms_ = msg->t_ms; // 初始化 dt 起始帧
+                pushStateHistory(rclcpp::Time(msg->header.stamp).nanoseconds());
 
                 // 用标定结束帧的原始值初始化低通滤波器（避免第一帧阶跃）
                 gyro_filtered_  = Eigen::Vector3d(
@@ -456,6 +477,7 @@ namespace nav_data_handle {
         // visualizer（用 ROS 系统时间戳，保持 TF/Nav2 兼容性）
         publishOdometry(msg->header.stamp);
         publishRawOdometry(msg->header.stamp);
+        pushStateHistory(rclcpp::Time(msg->header.stamp).nanoseconds());
 
         // update
         last_t_ms_ = msg->t_ms;
@@ -681,6 +703,24 @@ namespace nav_data_handle {
              Kk * R_yaw * Kk.transpose();
     }
 
+    void NavDataHandle::observeYawResidual(double yaw_innovation, double R_yaw) {
+
+        // 1 维观测：GICP yaw 残差已在 LiDAR 回调用相同帧间时间戳算好。
+        Eigen::Matrix<double, 1, 15> H = Eigen::Matrix<double, 1, 15>::Zero();
+        H(0, 8) = 1.0;  // δθ_z
+
+        double S_val = (H * P_ * H.transpose())(0, 0) + R_yaw;
+        Eigen::Matrix<double, 15, 1> Kk = P_ * H.transpose() * (1.0 / S_val);
+
+        delta_x_ += Kk * yaw_innovation;
+
+        Eigen::Matrix<double, 15, 15> I15 =
+            Eigen::Matrix<double, 15, 15>::Identity();
+        P_ = (I15 - Kk * H) * P_ *
+             (I15 - Kk * H).transpose() +
+             Kk * R_yaw * Kk.transpose();
+    }
+
     void NavDataHandle::observeZeroTilt() {
 
         // 地面机器人约束：pitch ≈ 0, roll ≈ 0
@@ -811,6 +851,7 @@ namespace nav_data_handle {
     // 每轮：重置 P/δx → 观测在当前状态上重线性化 → 累积 δx → 手动更新状态供下轮重线性化
     // 循环结束后：一次性 injectAndReset + P 旋转
     void NavDataHandle::iteratedObserve(double dt) {
+        (void)dt;
 
         // 保存 predict 后的完整名义状态
         p_prop_   = p_;
@@ -823,8 +864,7 @@ namespace nav_data_handle {
         // 消费 lidarCallback 异步计算的 ICP 结果
         Eigen::Vector4d y_lidar = Eigen::Vector4d::Zero();
         Eigen::Matrix<double, 4, 4> R_lidar_scaled = R_lidar_;
-        double delta_yaw_icp = 0.0;
-        Eigen::Quaterniond yaw_ref_q = Eigen::Quaterniond::Identity();
+        double yaw_innovation = 0.0;
         bool use_lidar = false;
         bool use_lidar_yaw = false;
         {
@@ -832,8 +872,7 @@ namespace nav_data_handle {
             if (icp_result_ready_) {
                 y_lidar = icp_y_lidar_;
                 R_lidar_scaled = icp_R_lidar_;
-                delta_yaw_icp = icp_delta_yaw_;
-                yaw_ref_q = icp_yaw_ref_q_;
+                yaw_innovation = icp_yaw_innovation_;
                 use_lidar = true;
                 use_lidar_yaw = icp_yaw_ready_;
                 icp_result_ready_ = false;
@@ -861,8 +900,8 @@ namespace nav_data_handle {
             }
             observeZeroTilt();
             if (use_lidar_yaw) {
-                // ICP Δyaw 约束相邻 lidar 姿态间的 yaw 变化，避免时间跨度不一致。
-                observeYaw(delta_yaw_icp, yaw_ref_q, r_lidar_yaw_delta_);
+                // ICP yaw 残差已按相邻 lidar 时间戳对齐，避免用当前 IMU 时刻混合时间跨度。
+                observeYawResidual(yaw_innovation, r_lidar_yaw_delta_);
             }
 
             // 累积本轮 δx
@@ -1025,6 +1064,287 @@ namespace nav_data_handle {
         path_raw_pub_->publish(path_raw_);
     }
 
+    void NavDataHandle::pushStateHistory(int64_t stamp_ns)
+    {
+        if (stamp_ns <= 0) return;
+
+        StateSnapshot snapshot;
+        snapshot.stamp_ns = stamp_ns;
+        snapshot.p = p_;
+        snapshot.q = q_.normalized();
+
+        std::lock_guard<std::mutex> lock(state_history_mtx_);
+        if (!state_history_.empty() && stamp_ns < state_history_.back().stamp_ns) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "IMU 状态时间倒退，清空 deskew 状态历史");
+            state_history_.clear();
+        }
+        if (state_history_.empty() || stamp_ns > state_history_.back().stamp_ns) {
+            state_history_.push_back(snapshot);
+        } else {
+            state_history_.back() = snapshot;
+        }
+
+        const int64_t keep_ns = static_cast<int64_t>(state_history_duration_ * 1e9);
+        while (state_history_.size() > 2 &&
+            stamp_ns - state_history_.front().stamp_ns > keep_ns) {
+            state_history_.pop_front();
+        }
+    }
+
+    bool NavDataHandle::interpolateState(
+        int64_t stamp_ns, Eigen::Vector3d &p, Eigen::Quaterniond &q) const
+    {
+        std::lock_guard<std::mutex> lock(state_history_mtx_);
+        if (state_history_.size() < 2 || stamp_ns < state_history_.front().stamp_ns) {
+            return false;
+        }
+
+        if (stamp_ns > state_history_.back().stamp_ns) {
+            const auto &prev = state_history_[state_history_.size() - 2];
+            const auto &last = state_history_.back();
+            const int64_t ahead_ns = stamp_ns - last.stamp_ns;
+            if (ahead_ns > 150000000) {
+                return false;
+            }
+
+            const double span = static_cast<double>(last.stamp_ns - prev.stamp_ns);
+            if (span <= 0.0) return false;
+
+            Eigen::Quaterniond dq = prev.q.conjugate() * last.q;
+            if (dq.w() < 0.0) dq.coeffs() = -dq.coeffs();
+            Eigen::AngleAxisd aa(dq);
+            Eigen::Vector3d dtheta = aa.angle() * aa.axis();
+            double ratio = static_cast<double>(ahead_ns) / span;
+
+            p = last.p + (last.p - prev.p) * ratio;
+            Eigen::Vector3d extrapolated_dtheta = dtheta * ratio;
+            if (extrapolated_dtheta.norm() > 1e-10) {
+                q = (last.q * Eigen::Quaterniond(Eigen::AngleAxisd(
+                    extrapolated_dtheta.norm(), extrapolated_dtheta.normalized()))).normalized();
+            } else {
+                q = last.q;
+            }
+            return true;
+        }
+
+        for (size_t i = 1; i < state_history_.size(); i ++) {
+            const auto &prev = state_history_[i - 1];
+            const auto &next = state_history_[i];
+            if (stamp_ns > next.stamp_ns) continue;
+
+            const double span = static_cast<double>(next.stamp_ns - prev.stamp_ns);
+            const double ratio = span > 0.0 ?
+                static_cast<double>(stamp_ns - prev.stamp_ns) / span : 0.0;
+            p = (1.0 - ratio) * prev.p + ratio * next.p;
+            q = prev.q.slerp(ratio, next.q).normalized();
+            return true;
+        }
+
+        return false;
+    }
+
+    Eigen::Matrix4d NavDataHandle::bodyToLidarTransform(
+        const Eigen::Matrix4d &body_tf
+    ) const
+    {
+        Eigen::Matrix4d lidar_tf = Eigen::Matrix4d::Identity();
+        Eigen::Matrix3d R_body = body_tf.block<3, 3>(0, 0);
+        Eigen::Vector3d t_body = body_tf.block<3, 1>(0, 3);
+
+        lidar_tf.block<3, 3>(0, 0) =
+            R_lidar_to_body_.transpose() * R_body * R_lidar_to_body_;
+        lidar_tf.block<3, 1>(0, 3) = R_lidar_to_body_.transpose() * t_body;
+        return lidar_tf;
+    }
+
+    bool NavDataHandle::estimateLidarMotion(
+        int64_t source_stamp_ns, int64_t target_stamp_ns,
+        Eigen::Matrix4d &source_to_target
+    ) const
+    {
+        Eigen::Vector3d p_source, p_target;
+        Eigen::Quaterniond q_source, q_target;
+        if (!interpolateState(source_stamp_ns, p_source, q_source) ||
+            !interpolateState(target_stamp_ns, p_target, q_target)) {
+            return false;
+        }
+
+        Eigen::Matrix4d body_source_to_target = Eigen::Matrix4d::Identity();
+        Eigen::Matrix3d R_source = q_source.toRotationMatrix();
+        Eigen::Matrix3d R_target = q_target.toRotationMatrix();
+        body_source_to_target.block<3, 3>(0, 0) = R_target.transpose() * R_source;
+        body_source_to_target.block<3, 1>(0, 3) =
+            R_target.transpose() * (p_source - p_target);
+
+        source_to_target = bodyToLidarTransform(body_source_to_target);
+        return true;
+    }
+
+    bool NavDataHandle::parseLidarFrame(
+        const sensor_msgs::msg::PointCloud2::SharedPtr msg,
+        LidarFrame &frame
+    )
+    {
+        frame = LidarFrame{};
+        frame.cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        frame.stamp_ns = rclcpp::Time(msg->header.stamp).nanoseconds();
+        if (frame.stamp_ns <= 0) frame.stamp_ns = this->now().nanoseconds();
+        frame.min_point_stamp_ns = std::numeric_limits<int64_t>::max();
+        frame.max_point_stamp_ns = std::numeric_limits<int64_t>::min();
+
+        if (msg->is_bigendian) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "暂不支持 big-endian PointCloud2，跳过本帧点云");
+            return false;
+        }
+
+        const sensor_msgs::msg::PointField *x_field = nullptr;
+        const sensor_msgs::msg::PointField *y_field = nullptr;
+        const sensor_msgs::msg::PointField *z_field = nullptr;
+        const sensor_msgs::msg::PointField *time_field = nullptr;
+        for (const auto &field : msg->fields) {
+            if (field.name == "x") x_field = &field;
+            else if (field.name == "y") y_field = &field;
+            else if (field.name == "z") z_field = &field;
+            else if (field.name == "timestamp" || field.name == "time" ||
+                field.name == "offset_time") {
+                time_field = &field;
+            }
+        }
+
+        if (!x_field || !y_field || !z_field ||
+            x_field->datatype != sensor_msgs::msg::PointField::FLOAT32 ||
+            y_field->datatype != sensor_msgs::msg::PointField::FLOAT32 ||
+            z_field->datatype != sensor_msgs::msg::PointField::FLOAT32) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "PointCloud2 缺少 FLOAT32 x/y/z 字段，跳过本帧点云");
+            return false;
+        }
+
+        const size_t point_count = static_cast<size_t>(msg->width) * msg->height;
+        frame.raw_points = point_count;
+        frame.cloud->reserve(point_count);
+        std::vector<int64_t> point_stamps;
+        point_stamps.reserve(point_count);
+
+        auto read_float = [&](size_t point_offset, uint32_t field_offset) {
+            float value = 0.0F;
+            std::memcpy(&value, &msg->data[point_offset + field_offset], sizeof(float));
+            return value;
+        };
+        auto read_point_time = [&](size_t point_offset) -> int64_t {
+            if (!time_field) return frame.stamp_ns;
+
+            double value = 0.0;
+            if (time_field->datatype == sensor_msgs::msg::PointField::FLOAT64) {
+                std::memcpy(&value, &msg->data[point_offset + time_field->offset], sizeof(double));
+            } else if (time_field->datatype == sensor_msgs::msg::PointField::FLOAT32) {
+                float value_f = 0.0F;
+                std::memcpy(
+                    &value_f, &msg->data[point_offset + time_field->offset], sizeof(float));
+                value = value_f;
+            } else if (time_field->datatype == sensor_msgs::msg::PointField::UINT32) {
+                uint32_t value_u = 0;
+                std::memcpy(
+                    &value_u, &msg->data[point_offset + time_field->offset], sizeof(uint32_t));
+                value = static_cast<double>(value_u);
+            } else {
+                return frame.stamp_ns;
+            }
+
+            if (!std::isfinite(value)) return frame.stamp_ns;
+
+            const double as_abs_ns = value;
+            const double as_abs_sec = value * 1e9;
+            if (std::abs(as_abs_ns - static_cast<double>(frame.stamp_ns)) < 5.0e9) {
+                return static_cast<int64_t>(std::llround(as_abs_ns));
+            }
+            if (std::abs(as_abs_sec - static_cast<double>(frame.stamp_ns)) < 5.0e9) {
+                return static_cast<int64_t>(std::llround(as_abs_sec));
+            }
+            if (std::abs(value) <= 1.0) {
+                return frame.stamp_ns + static_cast<int64_t>(std::llround(value * 1e9));
+            }
+            if (std::abs(value) <= 1.0e6) {
+                return frame.stamp_ns + static_cast<int64_t>(std::llround(value * 1e3));
+            }
+            return frame.stamp_ns + static_cast<int64_t>(std::llround(value));
+        };
+
+        for (size_t i = 0; i < point_count; i ++) {
+            const size_t point_offset = i * msg->point_step;
+            pcl::PointXYZ point;
+            point.x = read_float(point_offset, x_field->offset);
+            point.y = read_float(point_offset, y_field->offset);
+            point.z = read_float(point_offset, z_field->offset);
+            if (!pcl::isFinite(point)) continue;
+
+            const int64_t point_stamp_ns = read_point_time(point_offset);
+            frame.cloud->points.push_back(point);
+            point_stamps.push_back(point_stamp_ns);
+            frame.min_point_stamp_ns = std::min(frame.min_point_stamp_ns, point_stamp_ns);
+            frame.max_point_stamp_ns = std::max(frame.max_point_stamp_ns, point_stamp_ns);
+        }
+
+        frame.cloud->width = static_cast<uint32_t>(frame.cloud->points.size());
+        frame.cloud->height = 1;
+        frame.cloud->is_dense = true;
+        frame.has_point_time = time_field != nullptr && frame.cloud->size() > 0;
+        if (frame.min_point_stamp_ns == std::numeric_limits<int64_t>::max()) {
+            frame.min_point_stamp_ns = frame.stamp_ns;
+            frame.max_point_stamp_ns = frame.stamp_ns;
+        }
+
+        if (!enable_lidar_deskew_ || !frame.has_point_time || frame.cloud->empty()) {
+            return true;
+        }
+
+        Eigen::Vector3d p_ref;
+        Eigen::Quaterniond q_ref;
+        if (!interpolateState(frame.max_point_stamp_ns, p_ref, q_ref)) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "deskew 缺少参考时刻 IMU 状态，使用原始点云");
+            return true;
+        }
+
+        bool all_points_deskewed = true;
+        for (size_t i = 0; i < frame.cloud->points.size(); i ++) {
+            Eigen::Vector3d p_i;
+            Eigen::Quaterniond q_i;
+            if (!interpolateState(point_stamps[i], p_i, q_i)) {
+                all_points_deskewed = false;
+                continue;
+            }
+
+            const auto &src = frame.cloud->points[i];
+            Eigen::Vector3d point_lidar(src.x, src.y, src.z);
+            Eigen::Vector3d point_body = R_lidar_to_body_ * point_lidar;
+            Eigen::Vector3d point_world = q_i * point_body;
+            if (deskew_translation_) point_world += p_i;
+
+            Eigen::Vector3d point_ref_body =
+                q_ref.conjugate() * (deskew_translation_ ? point_world - p_ref : point_world);
+            Eigen::Vector3d point_ref_lidar = R_lidar_to_body_.transpose() * point_ref_body;
+
+            frame.cloud->points[i].x = static_cast<float>(point_ref_lidar.x());
+            frame.cloud->points[i].y = static_cast<float>(point_ref_lidar.y());
+            frame.cloud->points[i].z = static_cast<float>(point_ref_lidar.z());
+        }
+
+        frame.deskewed = all_points_deskewed;
+        if (!all_points_deskewed) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "部分点缺少 IMU 状态，deskew 仅应用于可插值点");
+        }
+        return true;
+    }
+
     Eigen::Matrix4d NavDataHandle::estimate_motion_with_gicp(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr &source_cloud,
         const pcl::PointCloud<pcl::PointXYZ>::Ptr &target_cloud,
@@ -1053,6 +1373,12 @@ namespace nav_data_handle {
         for (const auto& p : filtered_source->points) {
             if (pcl::isFinite(p)) clean_source->points.push_back(p);
         }
+        clean_target->width = static_cast<uint32_t>(clean_target->points.size());
+        clean_target->height = 1;
+        clean_target->is_dense = true;
+        clean_source->width = static_cast<uint32_t>(clean_source->points.size());
+        clean_source->height = 1;
+        clean_source->is_dense = true;
 
         // 点数不足时返回单位阵
         if (clean_target->size() < 10 || clean_source->size() < 10) {
@@ -1091,47 +1417,46 @@ namespace nav_data_handle {
             return;
         }
 
-        // 将 ROS 点云转为 PCL 格式，移除 NaN/Inf
-        auto raw = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        pcl::fromROSMsg(*msg, *raw);
-        auto cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        std::vector<int> indices;
-        pcl::removeNaNFromPointCloud(*raw, *cloud, indices);
+        LidarFrame frame;
+        if (!parseLidarFrame(msg, frame) || !frame.cloud || frame.cloud->empty()) {
+            gicp_running_ = false;
+            return;
+        }
 
         static int cb_cnt = 0;
         if (++cb_cnt <= 5 || cb_cnt % 100 == 0) {
             RCLCPP_INFO(this->get_logger(),
-                "LIDAR CB #%d: raw=%zu, after_NaN=%zu",
-                cb_cnt, raw->size(), cloud->size());
+                "LIDAR CB #%d: raw=%zu, valid=%zu, scan=%.3fms, deskew=%d",
+                cb_cnt, frame.raw_points, frame.cloud->size(),
+                static_cast<double>(frame.max_point_stamp_ns - frame.min_point_stamp_ns) * 1e-6,
+                frame.deskewed);
         }
 
         // 使用点云消息时间戳计算帧间隔，避免 GICP 执行耗时/回放调度抖动污染速度观测
-        int64_t lidar_stamp_ns = rclcpp::Time(msg->header.stamp).nanoseconds();
-        if (lidar_stamp_ns <= 0) {
-            lidar_stamp_ns = this->now().nanoseconds();
-        }
+        int64_t lidar_stamp_ns = frame.has_point_time ?
+            frame.max_point_stamp_ns : frame.stamp_ns;
         int64_t wall_stamp_ns = this->now().nanoseconds();
         double wall_callback_dt = 0.0;
         if (last_lidar_wall_ns_ > 0) {
             wall_callback_dt = static_cast<double>(wall_stamp_ns - last_lidar_wall_ns_) * 1e-9;
         }
 
-        auto cloud_for_gicp = cloud;
+        auto cloud_for_gicp = frame.cloud;
         if (max_points_before_gicp_ > 0 &&
-            cloud->size() > static_cast<size_t>(max_points_before_gicp_)) {
+            frame.cloud->size() > static_cast<size_t>(max_points_before_gicp_)) {
 
             auto limited_cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
             limited_cloud->reserve(max_points_before_gicp_);
-            double stride = static_cast<double>(cloud->size()) /
+            double stride = static_cast<double>(frame.cloud->size()) /
                             static_cast<double>(max_points_before_gicp_);
             for (int i = 0; i < max_points_before_gicp_; i ++) {
                 size_t idx = static_cast<size_t>(i * stride);
-                if (idx >= cloud->size()) idx = cloud->size() - 1;
-                limited_cloud->points.push_back(cloud->points[idx]);
+                if (idx >= frame.cloud->size()) idx = frame.cloud->size() - 1;
+                limited_cloud->points.push_back(frame.cloud->points[idx]);
             }
             limited_cloud->width = static_cast<uint32_t>(limited_cloud->points.size());
             limited_cloud->height = 1;
-            limited_cloud->is_dense = cloud->is_dense;
+            limited_cloud->is_dense = frame.cloud->is_dense;
             cloud_for_gicp = limited_cloud;
         }
 
@@ -1144,6 +1469,15 @@ namespace nav_data_handle {
         if (prev_cloud_ && prev_cloud_->size() > 0 && cloud_for_gicp->size() > 0) {
 
             double score = 0.0;
+            Eigen::Matrix4d predicted_source_to_target = Eigen::Matrix4d::Identity();
+            if (estimateLidarMotion(
+                    prev_lidar_frame_.max_point_stamp_ns, lidar_stamp_ns,
+                    predicted_source_to_target)) {
+                gicp_init_guess_ = predicted_source_to_target.cast<float>();
+            } else {
+                gicp_init_guess_ = Eigen::Matrix4f::Identity();
+            }
+
             // 观测gicp匹配用时
             int64_t gicp_start_ns = this->now().nanoseconds();
             pcl::PointCloud<pcl::PointXYZ>::Ptr aligned_cloud;
@@ -1151,7 +1485,6 @@ namespace nav_data_handle {
                 prev_cloud_, cloud_for_gicp, score, aligned_cloud);
             double gicp_cost_ms =
                 static_cast<double>(this->now().nanoseconds() - gicp_start_ns) * 1e-6;
-            gicp_init_guess_ = T.cast<float>();
 
             // 发布 GICP 对齐后的点云
             if (publish_aligned_cloud_ && aligned_cloud && aligned_cloud->size() > 0) {
@@ -1175,9 +1508,11 @@ namespace nav_data_handle {
             RCLCPP_INFO_THROTTLE(
                 this->get_logger(), *this->get_clock(), 1000,
                 "ICP RESULT: score=%.4f thresh=%.4f dt=%.3f wall_dt=%.3f "
-                "gicp=%.1fms skipped=%d pts=%zu/%zu",
+                "scan=%.1fms deskew=%d gicp=%.1fms skipped=%d pts=%zu/%zu",
                 score, icp_fitness_threshold_, lidar_dt, wall_callback_dt,
-                gicp_cost_ms, skipped_scan_count, cloud_for_gicp->size(), cloud->size());
+                static_cast<double>(frame.max_point_stamp_ns - frame.min_point_stamp_ns) * 1e-6,
+                frame.deskewed, gicp_cost_ms, skipped_scan_count,
+                cloud_for_gicp->size(), frame.cloud->size());
 
             if (skipped_scan_count > 0) {
                 RCLCPP_WARN_THROTTLE(
@@ -1190,6 +1525,8 @@ namespace nav_data_handle {
             if (score < icp_fitness_threshold_ &&
                 lidar_dt > 0.01 && lidar_dt < 1.0) {
 
+                // 保持原有观测方向：当前外参/坐标定义下，small_gicp 的 T 已与车体系速度符号一致。
+                // 这里不能取 inverse，否则 /odom 会反方向移动。
                 Eigen::Vector3d t = T.block<3, 1>(0, 3);
                 Eigen::Matrix3d R_icp = T.block<3, 3>(0, 0);
                 Eigen::Vector3d v_icp = t / lidar_dt;
@@ -1204,6 +1541,26 @@ namespace nav_data_handle {
                 // 提取 ICP yaw 变化量（车体系），用于直接观测 yaw 角
                 Eigen::Matrix3d R_icp_body = R_lidar_to_body_ * R_icp * R_lidar_to_body_.transpose();
                 double delta_yaw_icp = std::atan2(R_icp_body(1, 0), R_icp_body(0, 0));
+                double delta_yaw_pred = 0.0;
+                bool yaw_pred_ready = false;
+                Eigen::Vector3d p_yaw_source, p_yaw_target;
+                Eigen::Quaterniond q_yaw_source, q_yaw_target;
+                if (interpolateState(
+                        prev_lidar_frame_.max_point_stamp_ns, p_yaw_source, q_yaw_source) &&
+                    interpolateState(lidar_stamp_ns, p_yaw_target, q_yaw_target)) {
+                    auto extract_yaw = [](const Eigen::Quaterniond &q) {
+                        return std::atan2(
+                            2.0 * (q.w() * q.z() + q.x() * q.y()),
+                            1.0 - 2.0 * (q.y() * q.y() + q.z() * q.z()));
+                    };
+                    delta_yaw_pred = extract_yaw(q_yaw_target) - extract_yaw(q_yaw_source);
+                    yaw_pred_ready = true;
+                }
+                while (delta_yaw_pred > M_PI) delta_yaw_pred -= 2.0 * M_PI;
+                while (delta_yaw_pred < -M_PI) delta_yaw_pred += 2.0 * M_PI;
+                double yaw_innovation = delta_yaw_icp - delta_yaw_pred;
+                while (yaw_innovation > M_PI) yaw_innovation -= 2.0 * M_PI;
+                while (yaw_innovation < -M_PI) yaw_innovation += 2.0 * M_PI;
 
                 Eigen::Vector3d v_body_pred = q_.toRotationMatrix().transpose() * v_;
                 Eigen::Vector3d innovation = v_icp - v_body_pred;
@@ -1247,19 +1604,23 @@ namespace nav_data_handle {
                     double scale_gyro = 1.0 + 50.0 * gyro_norm * gyro_norm;
                     double scale_fitness = 1.0 + 5.0 * (score / icp_fitness_threshold_);
                     double scale_total = scale_gyro * scale_fitness;
+                    (void)scale_total;
 
                     std::lock_guard<std::mutex> lock(icp_result_mtx_);
                     icp_y_lidar_ = y;
                     icp_R_lidar_ = R_lidar_;// * scale_total;
                     icp_delta_yaw_ = delta_yaw_icp;
+                    icp_yaw_innovation_ = yaw_innovation;
                     icp_yaw_ref_q_ = prev_lidar_q_;
-                    icp_yaw_ready_ = prev_lidar_q_ready_;
+                    icp_yaw_ready_ = yaw_pred_ready;
                     icp_result_ready_ = true;
                 }
             }
         }
 
         prev_cloud_ = cloud_for_gicp;
+        prev_lidar_frame_ = frame;
+        prev_lidar_frame_.cloud = cloud_for_gicp;
         prev_lidar_q_ = q_.normalized();
         prev_lidar_q_ready_ = true;
         last_lidar_stamp_ns_ = lidar_stamp_ns;

@@ -19,7 +19,10 @@
 #include <fstream>
 #include <mutex>
 #include <atomic>
+#include <deque>
+#include <limits>
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include "sensor_msgs/msg/point_field.hpp"
 
 #include <pcl-1.14/pcl/point_cloud.h> // 点云基础类型
 #include <pcl-1.14/pcl/point_types.h> // 点类型定义
@@ -165,6 +168,31 @@ namespace nav_data_handle {
             const Eigen::Vector4d &y_obs, const Eigen::Matrix<double, 4, 4> &R_obs);
         void observeYaw(
             double delta_yaw_icp, const Eigen::Quaterniond &q_lidar_ref, double R_yaw);
+        void observeYawResidual(double yaw_innovation, double R_yaw);
+        struct LidarFrame {
+            pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
+            int64_t stamp_ns = 0;
+            int64_t min_point_stamp_ns = 0;
+            int64_t max_point_stamp_ns = 0;
+            bool has_point_time = false; // 是否退化
+            bool deskewed = false;
+            size_t raw_points = 0;
+        };
+        struct StateSnapshot {
+            int64_t stamp_ns = 0;
+            Eigen::Vector3d p = Eigen::Vector3d::Zero();
+            Eigen::Quaterniond q = Eigen::Quaterniond::Identity();
+        };
+        bool parseLidarFrame(
+            const sensor_msgs::msg::PointCloud2::SharedPtr msg,
+            LidarFrame &frame);
+        void pushStateHistory(int64_t stamp_ns);
+        bool interpolateState(
+            int64_t stamp_ns, Eigen::Vector3d &p, Eigen::Quaterniond &q) const;
+        bool estimateLidarMotion(
+            int64_t source_stamp_ns, int64_t target_stamp_ns,
+            Eigen::Matrix4d &source_to_target) const;
+        Eigen::Matrix4d bodyToLidarTransform(const Eigen::Matrix4d &body_tf) const;
         Eigen::Matrix4d estimate_motion_with_gicp(
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &source_cloud,
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &target_cloud,
@@ -173,6 +201,7 @@ namespace nav_data_handle {
         );
         rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub_;
         pcl::PointCloud<pcl::PointXYZ>::Ptr prev_cloud_;
+        LidarFrame prev_lidar_frame_;
         std::atomic<bool> gicp_running_{false};  // 防积压：GICP 还在跑时跳过新帧
 
         // ICP 结果缓冲（lidarCallback 计算，iteratedObserve 消费）
@@ -180,6 +209,7 @@ namespace nav_data_handle {
         bool icp_result_ready_ = false;
         Eigen::Vector4d icp_y_lidar_ = Eigen::Vector4d::Zero();
         double icp_delta_yaw_ = 0.0;
+        double icp_yaw_innovation_ = 0.0;
         Eigen::Quaterniond icp_yaw_ref_q_ = Eigen::Quaterniond::Identity();
         bool icp_yaw_ready_ = false;
 
@@ -193,9 +223,14 @@ namespace nav_data_handle {
         int max_points_before_gicp_ = 0;
         double r_lidar_yaw_delta_ = 0.05;
         Eigen::Matrix4f gicp_init_guess_ = Eigen::Matrix4f::Identity();
+        bool enable_lidar_deskew_ = true;
+        bool deskew_translation_ = false;
+        double state_history_duration_ = 3.0;
         Eigen::Matrix<double, 4, 4> R_lidar_;
         Eigen::Matrix<double, 4, 4> icp_R_lidar_;  // 自适应缩放后的 R_lidar
         Eigen::Matrix3d R_lidar_to_body_;           // 雷达系 → 车体系旋转
+        std::deque<StateSnapshot> state_history_;
+        mutable std::mutex state_history_mtx_;
 
         // 零偏标定状态机
         enum class CalibState { CALIBRATING, RUNNING };
