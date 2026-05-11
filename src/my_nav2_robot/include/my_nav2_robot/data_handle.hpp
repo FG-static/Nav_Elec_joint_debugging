@@ -132,6 +132,7 @@ namespace nav_data_handle {
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gicp_yaw_debug_pub_;
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gicp_status_pub_;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr aligned_cloud_pub_;
+        rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr gicp_map_pub_;
         std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     
         // 名义状态
@@ -200,6 +201,16 @@ namespace nav_data_handle {
             int64_t source_stamp_ns, int64_t target_stamp_ns,
             Eigen::Matrix4d &source_to_target) const;
         Eigen::Matrix4d bodyToLidarTransform(const Eigen::Matrix4d &body_tf) const;
+        void resetGicpMap(
+            const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
+            const rclcpp::Time &stamp);
+        void resetGicpMapTransform();
+        void publishGicpMapTransform(const rclcpp::Time &stamp);
+        void updateGicpMap(
+            const pcl::PointCloud<pcl::PointXYZ>::Ptr &current_cloud,
+            const Eigen::Matrix4d &prev_to_current,
+            const rclcpp::Time &stamp);
+        void publishGicpMap(const rclcpp::Time &stamp);
         Eigen::Matrix4d estimate_motion_with_gicp(
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &source_cloud,
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &target_cloud,
@@ -237,6 +248,16 @@ namespace nav_data_handle {
         double lidar_max_gicp_yaw_delta_ = 0.35;
         double lidar_max_gicp_yaw_innovation_ = 0.15;
         double lidar_max_gicp_velocity_innovation_ = 0.75;
+        bool publish_gicp_map_ = true;
+        double gicp_map_leaf_size_ = 0.10;
+        int gicp_map_max_points_ = 300000;
+        std::string gicp_map_frame_ = "gicp_map";
+        std::string gicp_map_parent_frame_ = "odom";
+        geometry_msgs::msg::TransformStamped gicp_map_tf_;
+        bool gicp_map_tf_ready_ = false;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr gicp_map_cloud_;
+        Eigen::Matrix4d gicp_current_to_map_ = Eigen::Matrix4d::Identity();
+        bool gicp_map_initialized_ = false;
         Eigen::Matrix4f gicp_init_guess_ = Eigen::Matrix4f::Identity();
         bool enable_lidar_deskew_ = true;
         bool deskew_translation_ = false;

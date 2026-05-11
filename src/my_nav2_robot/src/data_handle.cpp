@@ -75,6 +75,9 @@ namespace nav_data_handle {
         aligned_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
             "/gicp/aligned_cloud", 20
         );
+        gicp_map_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+            "/gicp/map_cloud", 2
+        );
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(* this);
 
         // 点云订阅：独立回调组，GICP 在此线程执行，不阻塞 IMU 200Hz 回调
@@ -106,6 +109,8 @@ namespace nav_data_handle {
         // 实际值将在零偏标定阶段根据重力方向自动计算（仅 pitch/roll，忽略 yaw）
         R_imu_to_body_.setIdentity();
         R_lidar_to_body_.setIdentity();
+        gicp_current_to_map_.setIdentity();
+        gicp_map_cloud_ = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
 
         // 从配置文件加载 P、Q、R、R_tilt 参数
         loadESKFParams();
@@ -211,6 +216,11 @@ namespace nav_data_handle {
         this->declare_parameter("lidar.max_gicp_yaw_delta", 0.35);
         this->declare_parameter("lidar.max_gicp_yaw_innovation", 0.15);
         this->declare_parameter("lidar.max_gicp_velocity_innovation", 0.75);
+        this->declare_parameter("lidar.publish_gicp_map", true);
+        this->declare_parameter("lidar.gicp_map_leaf_size", 0.10);
+        this->declare_parameter("lidar.gicp_map_max_points", 300000);
+        this->declare_parameter("lidar.gicp_map_frame", "gicp_map");
+        this->declare_parameter("lidar.gicp_map_parent_frame", "odom");
         voxel_leaf_size_       = this->get_parameter("lidar.icp_leaf_size").as_double();
         icp_fitness_threshold_ = this->get_parameter("lidar.icp_fitness_threshold").as_double();
         r_lidar_yaw_delta_ = this->get_parameter("lidar.r_lidar_yaw_delta").as_double();
@@ -233,6 +243,14 @@ namespace nav_data_handle {
             this->get_parameter("lidar.max_gicp_yaw_innovation").as_double();
         lidar_max_gicp_velocity_innovation_ =
             this->get_parameter("lidar.max_gicp_velocity_innovation").as_double();
+        publish_gicp_map_ = this->get_parameter("lidar.publish_gicp_map").as_bool();
+        gicp_map_leaf_size_ =
+            this->get_parameter("lidar.gicp_map_leaf_size").as_double();
+        gicp_map_max_points_ =
+            this->get_parameter("lidar.gicp_map_max_points").as_int();
+        gicp_map_frame_ = this->get_parameter("lidar.gicp_map_frame").as_string();
+        gicp_map_parent_frame_ =
+            this->get_parameter("lidar.gicp_map_parent_frame").as_string();
         if (state_history_duration_ < 1.0) {
             RCLCPP_WARN(
                 this->get_logger(),
@@ -255,6 +273,32 @@ namespace nav_data_handle {
                 this->get_logger(),
                 "lidar.icp_leaf_size=%.3f 过小，GICP 内部按 %.3f 使用以避免 VoxelGrid 溢出",
                 voxel_leaf_size_, lidar_min_voxel_leaf_size_);
+        }
+        if (gicp_map_leaf_size_ <= 0.0) {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "lidar.gicp_map_leaf_size=%.3f 无效，已按 0.10m 处理",
+                gicp_map_leaf_size_);
+            gicp_map_leaf_size_ = 0.10;
+        }
+        if (gicp_map_max_points_ < 0) {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "lidar.gicp_map_max_points=%d 无效，已按 0（不限制）处理",
+                gicp_map_max_points_);
+            gicp_map_max_points_ = 0;
+        }
+        if (gicp_map_frame_.empty()) {
+            gicp_map_frame_ = "gicp_map";
+        }
+        if (gicp_map_parent_frame_.empty()) {
+            gicp_map_parent_frame_ = "odom";
+        }
+        if (gicp_map_parent_frame_ == gicp_map_frame_) {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "lidar.gicp_map_parent_frame 与 lidar.gicp_map_frame 相同，"
+                "将不发布 GICP map TF");
         }
         if (max_points_before_gicp_ < 0) {
             RCLCPP_WARN(
@@ -1264,6 +1308,136 @@ namespace nav_data_handle {
         return lidar_tf;
     }
 
+    void NavDataHandle::resetGicpMap(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
+        const rclcpp::Time &stamp
+    ) {
+
+        if (!publish_gicp_map_ || !cloud || cloud->empty()) return;
+
+        gicp_current_to_map_ = Eigen::Matrix4d::Identity();
+        gicp_map_initialized_ = true;
+        resetGicpMapTransform();
+        gicp_map_cloud_->clear();
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr bounded_cloud;
+        if (filterCloudForGicp(cloud, bounded_cloud)) {
+
+            *gicp_map_cloud_ = *bounded_cloud;
+            publishGicpMap(stamp);
+        }
+    }
+
+    void NavDataHandle::resetGicpMapTransform()
+    {
+        if (gicp_map_parent_frame_ == gicp_map_frame_) {
+            gicp_map_tf_ready_ = false;
+            return;
+        }
+
+        // gicp_map 中的点仍是原始 PointCloud2 坐标约定。不要再叠加
+        // R_lidar_to_body_，否则会把 lidar_to_body_yaw 的 180 度外参重复应用到 RViz TF。
+        Eigen::Quaterniond q_map = q_;
+        q_map.normalize();
+
+        gicp_map_tf_.header.frame_id = gicp_map_parent_frame_;
+        gicp_map_tf_.child_frame_id = gicp_map_frame_;
+        gicp_map_tf_.transform.translation.x = p_.x();
+        gicp_map_tf_.transform.translation.y = p_.y();
+        gicp_map_tf_.transform.translation.z = p_.z();
+        gicp_map_tf_.transform.rotation.x = q_map.x();
+        gicp_map_tf_.transform.rotation.y = q_map.y();
+        gicp_map_tf_.transform.rotation.z = q_map.z();
+        gicp_map_tf_.transform.rotation.w = q_map.w();
+        gicp_map_tf_ready_ = true;
+    }
+
+    void NavDataHandle::publishGicpMapTransform(const rclcpp::Time &stamp)
+    {
+        if (!gicp_map_tf_ready_) return;
+
+        gicp_map_tf_.header.stamp = stamp;
+        tf_broadcaster_->sendTransform(gicp_map_tf_);
+    }
+
+    void NavDataHandle::updateGicpMap(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr &current_cloud,
+        const Eigen::Matrix4d &prev_to_current,
+        const rclcpp::Time &stamp
+    ) {
+
+        if (!publish_gicp_map_ || !current_cloud || current_cloud->empty()) return;
+
+        if (!gicp_map_initialized_) {
+
+            resetGicpMap(current_cloud, stamp);
+            return;
+        }
+
+        Eigen::Matrix4d current_to_prev = prev_to_current.inverse();
+        if (!current_to_prev.allFinite()) {
+
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 1000,
+                "GICP map transform invalid，跳过本帧叠图");
+            return;
+        }
+        gicp_current_to_map_ = gicp_current_to_map_ * current_to_prev;
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr bounded_cloud;
+        if (!filterCloudForGicp(current_cloud, bounded_cloud)) return;
+
+        auto cloud_in_map = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        pcl::transformPointCloud(
+            *bounded_cloud, *cloud_in_map, gicp_current_to_map_.cast<float>());
+        *gicp_map_cloud_ += *cloud_in_map;
+
+        pcl::VoxelGrid<pcl::PointXYZ> map_filter;
+        map_filter.setLeafSize(
+            static_cast<float>(gicp_map_leaf_size_),
+            static_cast<float>(gicp_map_leaf_size_),
+            static_cast<float>(gicp_map_leaf_size_));
+        auto filtered_map = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        map_filter.setInputCloud(gicp_map_cloud_);
+        map_filter.filter(*filtered_map);
+        gicp_map_cloud_ = filtered_map;
+
+        if (gicp_map_max_points_ > 0 &&
+            gicp_map_cloud_->size() > static_cast<size_t>(gicp_map_max_points_)) {
+
+            auto limited_map = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+            limited_map->reserve(gicp_map_max_points_);
+            const double stride = static_cast<double>(gicp_map_cloud_->size()) /
+                                  static_cast<double>(gicp_map_max_points_);
+            for (int i = 0; i < gicp_map_max_points_; i ++) {
+
+                size_t idx = static_cast<size_t>(i * stride);
+                if (idx >= gicp_map_cloud_->size()) idx = gicp_map_cloud_->size() - 1;
+                limited_map->points.push_back(gicp_map_cloud_->points[idx]);
+            }
+            limited_map->width = static_cast<uint32_t>(limited_map->points.size());
+            limited_map->height = 1;
+            limited_map->is_dense = gicp_map_cloud_->is_dense;
+            gicp_map_cloud_ = limited_map;
+        }
+
+        publishGicpMap(stamp);
+    }
+
+    void NavDataHandle::publishGicpMap(const rclcpp::Time &stamp) {
+
+        if (!publish_gicp_map_ || !gicp_map_cloud_ || gicp_map_cloud_->empty()) return;
+
+        sensor_msgs::msg::PointCloud2 map_msg;
+        pcl::toROSMsg(*gicp_map_cloud_, map_msg);
+        const rclcpp::Time publish_stamp = this->now();
+        (void)stamp;
+        map_msg.header.stamp = publish_stamp;
+        map_msg.header.frame_id = gicp_map_frame_;
+        publishGicpMapTransform(publish_stamp);
+        gicp_map_pub_->publish(map_msg);
+    }
+
     bool NavDataHandle::estimateLidarMotion(
         int64_t source_stamp_ns, int64_t target_stamp_ns,
         Eigen::Matrix4d &source_to_target
@@ -1627,6 +1801,11 @@ namespace nav_data_handle {
             //gicp_init_guess_ = Eigen::Matrix4f::Identity();
         }
 
+        if (!prev_cloud_ || prev_cloud_->empty()) {
+
+            resetGicpMap(cloud_for_gicp, msg->header.stamp);
+        }
+
         // GICP 在此线程执行（不阻塞 IMU 200Hz 回调）
         if (prev_cloud_ && prev_cloud_->size() > 0 && cloud_for_gicp->size() > 0) {
 
@@ -1701,6 +1880,7 @@ namespace nav_data_handle {
             if (!(std::isfinite(score) && score < icp_fitness_threshold_ &&
                 lidar_dt > 0.01 && lidar_dt < 1.0)) {
 
+                resetGicpMap(cloud_for_gicp, msg->header.stamp);
                 publish_gicp_status(1.0);
             } else {
 
@@ -1714,8 +1894,11 @@ namespace nav_data_handle {
                     RCLCPP_WARN_THROTTLE(
                         this->get_logger(), *this->get_clock(), 1000,
                         "ICP REJECTED: transform invalid det=%.3f", det);
+                    resetGicpMap(cloud_for_gicp, msg->header.stamp);
                     publish_gicp_status(2.0);
                 } else {
+
+                    updateGicpMap(cloud_for_gicp, T, msg->header.stamp);
 
                     Eigen::Vector3d v_icp = t / lidar_dt;
 

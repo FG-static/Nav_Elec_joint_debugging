@@ -47,18 +47,20 @@ data_handle_node:
     eskf.eps_dx: 0.0001            # 收敛阈值（弧度），||δx|| < eps 时停止迭代
 
     # 点云 ICP 观测参数
-    lidar.icp_leaf_size: 0.08        # 体素降采样边长 (m)，避免 PCL VoxelGrid 在大范围点云上索引溢出
+    lidar.icp_leaf_size: 0.15        # 体素降采样边长 (m)，避免 PCL VoxelGrid 在大范围点云上索引溢出
     lidar.icp_fitness_threshold: 2.0 # fitness_score > 此值则丢弃（配准失败）
     lidar.r_lidar_vx: 0.01           # ICP 前进速度观测噪声 (m/s)，越小越信任
     lidar.r_lidar_vy: 0.01             # ICP 横向速度观测噪声，ICP 横向可观测性差，给大噪声
     lidar.r_lidar_vz: 0.0025          # ICP 垂直速度观测噪声
-    lidar.r_lidar_wz: 100.0            # ICP yaw 角速度观测噪声 (rad/s)
+    lidar.r_lidar_wz: 0.01            # ICP yaw 角速度观测噪声 (rad/s)
     lidar.r_lidar_yaw_delta: 0.05     # ICP 帧间 yaw 增量观测噪声，先保守，稳定后可减小
+
     lidar.publish_aligned_cloud: false # 是否发布 /gicp/aligned_cloud，诊断掉帧时建议关闭
     lidar.max_points_before_gicp: 0     # GICP 前最大点数，0=不限制；用于诊断降负载
+
     lidar.enable_deskew: true           # 使用每点 timestamp + IMU 姿态历史做旋转去畸变
-    lidar.deskew_translation: false     # 第一版只补偿旋转，避免短时位置漂移污染点云
-    lidar.state_history_duration: 3.0   # deskew/初值使用的 ESKF 状态历史长度（秒）
+    lidar.deskew_translation: true     # 第一版只补偿旋转，避免短时位置漂移污染点云
+    lidar.state_history_duration: 2.0   # deskew/初值使用的 ESKF 状态历史长度（秒）
     lidar.max_range: 80.0               # GICP 前点云最大半径，滤掉 deskew/异常点造成的远距离群
     lidar.min_voxel_leaf_size: 0.05     # GICP 内部体素叶大小下限，防止 PCL VoxelGrid int32 溢出
     lidar.max_gicp_velocity: 2.5        # ICP 平面速度门控，过大视为错配准
@@ -66,6 +68,12 @@ data_handle_node:
     lidar.max_gicp_yaw_delta: 0.35      # 单帧 ICP yaw 增量门控
     lidar.max_gicp_yaw_innovation: 0.15 # ICP 与 ESKF 帧间 yaw 残差门控
     lidar.max_gicp_velocity_innovation: 0.75 # ICP 速度与当前状态速度差门控
+    
+    lidar.publish_gicp_map: true        # 发布 /gicp/map_cloud，用 GICP 相对变换累计叠图
+    lidar.gicp_map_leaf_size: 0.15      # 叠图发布前体素降采样边长 (m)
+    lidar.gicp_map_max_points: 0   # 叠图最大点数，0=不限制
+    lidar.gicp_map_frame: "gicp_map"    # 叠图坐标系，RViz Fixed Frame 设为该值即可查看
+    lidar.gicp_map_parent_frame: "odom" # 将叠图坐标系接入 TF 树
     lidar.lidar_to_body_roll: 0.0    # 雷达系→车体系欧拉角 (rad)
     lidar.lidar_to_body_pitch: 0.0
     lidar.lidar_to_body_yaw: 3.14159265  # 方向反转 180°
