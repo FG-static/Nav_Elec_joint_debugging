@@ -110,6 +110,7 @@ namespace nav_data_handle {
         // 接收 发布
         void publishOdometry(const rclcpp::Time &stamp);
         void publishRawOdometry(const rclcpp::Time &stamp);
+        void publishWzDebug();
         void odomRawCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
         rclcpp::Subscription<rm_interfaces::msg::Gimbal>::SharedPtr gimbal_sub_;
         rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_raw_sub_;
@@ -127,6 +128,9 @@ namespace nav_data_handle {
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr wheel_vel_filtered_pub_;
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gicp_vel_pub_;
         rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gicp_innovation_pub_;
+        rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gyro_z_debug_pub_;
+        rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gicp_yaw_debug_pub_;
+        rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gicp_status_pub_;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr aligned_cloud_pub_;
         std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     
@@ -187,6 +191,9 @@ namespace nav_data_handle {
             const sensor_msgs::msg::PointCloud2::SharedPtr msg,
             LidarFrame &frame);
         void pushStateHistory(int64_t stamp_ns);
+        bool filterCloudForGicp(
+            const pcl::PointCloud<pcl::PointXYZ>::Ptr &input,
+            pcl::PointCloud<pcl::PointXYZ>::Ptr &output) const;
         bool interpolateState(
             int64_t stamp_ns, Eigen::Vector3d &p, Eigen::Quaterniond &q) const;
         bool estimateLidarMotion(
@@ -207,6 +214,7 @@ namespace nav_data_handle {
         // ICP 结果缓冲（lidarCallback 计算，iteratedObserve 消费）
         std::mutex icp_result_mtx_;
         bool icp_result_ready_ = false;
+        bool icp_velocity_ready_ = false;
         Eigen::Vector4d icp_y_lidar_ = Eigen::Vector4d::Zero();
         double icp_delta_yaw_ = 0.0;
         double icp_yaw_innovation_ = 0.0;
@@ -222,6 +230,13 @@ namespace nav_data_handle {
         bool publish_aligned_cloud_ = false;
         int max_points_before_gicp_ = 0;
         double r_lidar_yaw_delta_ = 0.05;
+        double lidar_max_range_ = 80.0;
+        double lidar_min_voxel_leaf_size_ = 0.05;
+        double lidar_max_gicp_velocity_ = 2.5;
+        double lidar_max_gicp_yaw_rate_ = 2.5;
+        double lidar_max_gicp_yaw_delta_ = 0.35;
+        double lidar_max_gicp_yaw_innovation_ = 0.15;
+        double lidar_max_gicp_velocity_innovation_ = 0.75;
         Eigen::Matrix4f gicp_init_guess_ = Eigen::Matrix4f::Identity();
         bool enable_lidar_deskew_ = true;
         bool deskew_translation_ = false;
