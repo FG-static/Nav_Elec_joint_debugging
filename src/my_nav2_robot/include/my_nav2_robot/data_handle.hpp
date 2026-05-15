@@ -21,6 +21,7 @@
 #include <atomic>
 #include <deque>
 #include <limits>
+#include <vector>
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/msg/point_field.hpp"
 
@@ -171,11 +172,16 @@ namespace nav_data_handle {
         void lidarCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
         void observeVelocity(
             const Eigen::Vector4d &y_obs, const Eigen::Matrix<double, 4, 4> &R_obs);
+        void observeVelocity(
+            const Eigen::Vector4d &y_obs, const Eigen::Matrix<double, 4, 4> &R_obs,
+            const Eigen::Vector3d &v_body_at_lidar);
         void observeYaw(
             double delta_yaw_icp, const Eigen::Quaterniond &q_lidar_ref, double R_yaw);
         void observeYawResidual(double yaw_innovation, double R_yaw);
         struct LidarFrame {
             pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
+            pcl::PointCloud<pcl::PointXYZ>::Ptr raw_cloud;
+            std::vector<int64_t> point_stamps;
             int64_t stamp_ns = 0;
             int64_t min_point_stamp_ns = 0;
             int64_t max_point_stamp_ns = 0;
@@ -188,6 +194,11 @@ namespace nav_data_handle {
             Eigen::Vector3d p = Eigen::Vector3d::Zero();
             Eigen::Quaterniond q = Eigen::Quaterniond::Identity();
         };
+        struct LocalSubmapFrame {
+            pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
+            int64_t stamp_ns = 0;
+            Eigen::Matrix4d frame_to_submap = Eigen::Matrix4d::Identity();
+        };
         bool parseLidarFrame(
             const sensor_msgs::msg::PointCloud2::SharedPtr msg,
             LidarFrame &frame);
@@ -197,6 +208,11 @@ namespace nav_data_handle {
             pcl::PointCloud<pcl::PointXYZ>::Ptr &output) const;
         bool interpolateState(
             int64_t stamp_ns, Eigen::Vector3d &p, Eigen::Quaterniond &q) const;
+        bool applyGicpTranslationDeskew(
+            const LidarFrame &frame,
+            const Eigen::Matrix4d &prev_to_current,
+            int64_t current_stamp_ns,
+            pcl::PointCloud<pcl::PointXYZ>::Ptr &corrected_cloud);
         bool estimateLidarMotion(
             int64_t source_stamp_ns, int64_t target_stamp_ns,
             Eigen::Matrix4d &source_to_target) const;
@@ -211,6 +227,13 @@ namespace nav_data_handle {
             const Eigen::Matrix4d &prev_to_current,
             const rclcpp::Time &stamp);
         void publishGicpMap(const rclcpp::Time &stamp);
+        bool buildGicpLocalSubmap(
+            pcl::PointCloud<pcl::PointXYZ>::Ptr &local_submap);
+        void addGicpLocalSubmapFrame(
+            const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
+            int64_t stamp_ns,
+            const Eigen::Matrix4d &frame_to_submap);
+        void clearGicpLocalSubmap();
         Eigen::Matrix4d estimate_motion_with_gicp(
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &source_cloud,
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &target_cloud,
@@ -244,10 +267,23 @@ namespace nav_data_handle {
         double lidar_max_range_ = 80.0;
         double lidar_min_voxel_leaf_size_ = 0.05;
         double lidar_max_gicp_velocity_ = 2.5;
-        double lidar_max_gicp_yaw_rate_ = 2.5;
-        double lidar_max_gicp_yaw_delta_ = 0.35;
-        double lidar_max_gicp_yaw_innovation_ = 0.15;
+        double lidar_max_gicp_yaw_rate_ = 1.5;
+        double lidar_max_gicp_yaw_delta_ = 0.12;
+        double lidar_max_gicp_yaw_innovation_ = 0.025;
         double lidar_max_gicp_velocity_innovation_ = 0.75;
+        bool enable_gicp_local_submap_ = true;
+        int gicp_local_submap_max_frames_ = 10;
+        int gicp_local_submap_min_frames_ = 2;
+        double gicp_local_submap_leaf_size_ = 0.20;
+        int gicp_local_submap_max_points_ = 80000;
+        std::deque<LocalSubmapFrame> gicp_local_submap_frames_;
+        struct GicpDeskewAnchor {
+            bool ready = false;
+            int64_t stamp_ns = 0;
+            Eigen::Vector3d p = Eigen::Vector3d::Zero();
+            Eigen::Quaterniond q = Eigen::Quaterniond::Identity();
+        };
+        GicpDeskewAnchor gicp_deskew_anchor_;
         bool publish_gicp_map_ = true;
         double gicp_map_leaf_size_ = 0.10;
         int gicp_map_max_points_ = 300000;
@@ -267,6 +303,18 @@ namespace nav_data_handle {
         Eigen::Matrix3d R_lidar_to_body_;           // 雷达系 → 车体系旋转
         std::deque<StateSnapshot> state_history_;
         mutable std::mutex state_history_mtx_;
+
+        // 保护名义状态 p_/v_/q_ 在 IMU 线程和 lidar 线程之间的读写
+        mutable std::mutex state_mtx_;
+
+        // lidarCallback 时刻的 ESKF 状态快照（用于 GICP 速度/yaw 残差观测）
+        struct LidarStateSnapshot {
+            int64_t stamp_ns = 0;
+            Eigen::Vector3d v_body = Eigen::Vector3d::Zero();
+            double yaw = 0.0;
+        };
+        LidarStateSnapshot lidar_state_snap_;
+        mutable std::mutex lidar_snap_mtx_;
 
         // 零偏标定状态机
         enum class CalibState { CALIBRATING, RUNNING };
@@ -304,7 +352,7 @@ namespace nav_data_handle {
         uint32_t last_t_ms_ = 0; // MCU 上一帧采样时间戳（ms），用于计算 dt
         nav_msgs::msg::Path path_;
 
-        const Eigen::Vector3d G_VEC_{0, 0, -9.8}; // 重力加速度
+        const Eigen::Vector3d G_VEC_{0, 0, -9.80665}; // 重力加速度（与 imu_adapter 的 G 常数一致）
     };
 } // nav_data_handle
 
