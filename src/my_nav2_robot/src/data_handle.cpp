@@ -599,6 +599,22 @@ namespace nav_data_handle {
         gyro_compensated_pub_->publish(gyro_comp_msg);
         publishWzDebug();
 
+        // 推送IMU历史数据
+        ImuSample sample;
+        sample.stamp_ns = rclcpp::Time(msg->header.stamp).nanoseconds();
+        sample.acc_body = R_imu_to_body_ * acc_comp;
+        sample.gyro_body = R_imu_to_body_ * gyro_comp;
+        {
+            std::lock_guard<std::mutex> lock(imu_history_mtx_);
+            imu_history_.push_back(sample);
+            const int64_t keep_ns = static_cast<int64_t>(state_history_duration_ * 1e9);
+            while (imu_history_.size() > 2 &&
+                sample.stamp_ns - imu_history_.front().stamp_ns > keep_ns) {
+
+                imu_history_.pop_front();
+            }
+        }
+
         // visualizer（用 ROS 系统时间戳，保持 TF/Nav2 兼容性）
         {
             std::lock_guard<std::mutex> lock(state_mtx_);
@@ -1232,6 +1248,138 @@ namespace nav_data_handle {
         path_raw_pub_->publish(path_raw_);
     }
 
+    bool NavDataHandle::findAnchorState(
+        const int64_t stamp_ns,
+        StateSnapshot &anchor
+    ) const {
+
+        std::lock_guard<std::mutex> lock(state_history_mtx_);
+        if (state_history_.size() < 2 || stamp_ns < state_history_.front().stamp_ns) {
+
+            return false;
+        }
+        for (size_t i = state_history_.size(); i > 0; i --) {
+
+            if (stamp_ns >= state_history_[i - 1].stamp_ns) {
+                
+                anchor = state_history_[i - 1];
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool NavDataHandle::buildImuTrajectory(
+        const StateSnapshot &anchor,
+        const int64_t t_start,
+        const int64_t t_end,
+        std::vector<ScanPoseSample> &traj
+    ) const {
+
+        traj.clear();
+        if (t_start <= 0 || t_end <= t_start || anchor.stamp_ns > t_start) {
+
+            return false;
+        }
+
+        Eigen::Vector3d p = anchor.p;
+        Eigen::Vector3d v = anchor.v;
+        Eigen::Quaterniond q = anchor.q.normalized();
+        int64_t cur_ns = anchor.stamp_ns;
+    
+        std::vector<ImuSample> imu_data_segment;
+        {
+            std::lock_guard<std::mutex> lock(imu_history_mtx_);
+            for (const auto &data : imu_history_) {
+
+                if (data.stamp_ns > cur_ns && data.stamp_ns <= t_end) {
+
+                    imu_data_segment.push_back(data);
+                }
+            }
+        }
+        if (imu_data_segment.empty()) {
+
+            return false;
+        }
+
+        // scan内从(t_start, p0, q0, v0)逐段传播
+        auto propagate_to = [&](int64_t next_ns, const ImuSample &imu) {
+
+            double dt = static_cast<double>(next_ns - cur_ns) * 1e-9;
+            if (dt <= 0.0) return;
+
+            Eigen::Vector3d acc_world = q * imu.acc_body + G_VEC_;
+            p = p + v * dt + 0.5 * acc_world * dt * dt;
+            v = v + acc_world * dt;
+
+            Eigen::Vector3d dtheta = imu.gyro_body * dt;
+            if (dtheta.norm() > 1e-10) {
+
+                q = (q * Eigen::Quaterniond(
+                    Eigen::AngleAxisd(dtheta.norm(), dtheta.normalized()))).normalized();
+            }
+
+            cur_ns = next_ns;
+        };
+
+        // 遍历imu
+        for (const auto &imu : imu_data_segment) {
+
+            if (cur_ns < t_start && imu.stamp_ns > t_start) {
+
+                propagate_to(t_start, imu);
+                traj.push_back({t_start, p, q, v});
+            }
+            propagate_to(imu.stamp_ns, imu);
+
+            if (cur_ns >= t_start) traj.push_back({cur_ns, p, q, v});
+        }
+        if (cur_ns < t_start) return false;
+        if (cur_ns < t_end) {
+            
+            const ImuSample &last_imu = imu_data_segment.back();
+            propagate_to(t_end, last_imu);
+            traj.push_back({t_end, p, q, v});
+        }
+        return traj.size() >= 2;
+    }
+
+    bool NavDataHandle::lookupScanPose(
+        const std::vector<ScanPoseSample> &traj,
+        const int64_t stamp_ns,
+        Eigen::Vector3d &p,
+        Eigen::Quaterniond &q
+    ) const {
+
+        if (traj.empty() || stamp_ns < traj.front().stamp_ns ||
+            stamp_ns > traj.back().stamp_ns) {
+
+            return false;
+        }
+        if (traj.size() == 1 || stamp_ns == traj.front().stamp_ns) {
+
+            p = traj.front().p;
+            q = traj.front().q.normalized();
+            return true;
+        }
+
+        for (size_t i = 1; i < traj.size(); i ++) {
+
+            const auto &prev = traj[i - 1];
+            const auto &next = traj[i];
+            if (stamp_ns > next.stamp_ns) continue;
+
+            const double span = static_cast<double>(next.stamp_ns - prev.stamp_ns);
+            const double ratio = span > 0.0 ?
+                static_cast<double>(stamp_ns - prev.stamp_ns) / span : 0.0;
+            p = (1.0 - ratio) * prev.p + ratio * next.p;
+            q = prev.q.slerp(ratio, next.q).normalized();
+            return true;
+        }
+        return false;
+    }
+
     void NavDataHandle::pushStateHistory(int64_t stamp_ns) {
 
         if (stamp_ns <= 0) return;
@@ -1240,6 +1388,9 @@ namespace nav_data_handle {
         snapshot.stamp_ns = stamp_ns;
         snapshot.p = p_;
         snapshot.q = q_.normalized();
+        snapshot.v = v_;
+        snapshot.b_a = b_a_;
+        snapshot.b_g = b_g_;
 
         std::lock_guard<std::mutex> lock(state_history_mtx_);
         if (!state_history_.empty() && stamp_ns < state_history_.back().stamp_ns) {

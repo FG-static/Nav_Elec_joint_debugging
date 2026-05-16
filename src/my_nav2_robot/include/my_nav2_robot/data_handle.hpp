@@ -168,7 +168,7 @@ namespace nav_data_handle {
         Eigen::Matrix4d R_; // 观测噪声 - observeWheel 观测量 vx, vy, vz, wz
         Eigen::Matrix2d R_tilt_; // 观测噪声 - observeZeroTilt 观测量 pitch, roll
 
-        // 点云 ICP 观测
+        // 点云 GICP 观测
         void lidarCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
         void observeVelocity(
             const Eigen::Vector4d &y_obs, const Eigen::Matrix<double, 4, 4> &R_obs);
@@ -189,25 +189,56 @@ namespace nav_data_handle {
             bool deskewed = false;
             size_t raw_points = 0;
         };
+
         struct StateSnapshot {
             int64_t stamp_ns = 0;
             Eigen::Vector3d p = Eigen::Vector3d::Zero();
             Eigen::Quaterniond q = Eigen::Quaterniond::Identity();
+            Eigen::Vector3d v = Eigen::Vector3d::Zero();
+            Eigen::Vector3d b_a = Eigen::Vector3d::Zero();
+            Eigen::Vector3d b_g = Eigen::Vector3d::Zero();
         };
         struct LocalSubmapFrame {
             pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
             int64_t stamp_ns = 0;
             Eigen::Matrix4d frame_to_submap = Eigen::Matrix4d::Identity();
         };
+        struct ImuSample {
+            int64_t stamp_ns = 0;
+            Eigen::Vector3d acc_body = Eigen::Vector3d::Zero();
+            Eigen::Vector3d gyro_body = Eigen::Vector3d::Zero();
+        };
+        struct ScanPoseSample {
+            int64_t stamp_ns = 0;
+            Eigen::Vector3d p = Eigen::Vector3d::Zero();
+            Eigen::Quaterniond q = Eigen::Quaterniond::Identity();
+            Eigen::Vector3d v = Eigen::Vector3d::Zero();
+        };
+
         bool parseLidarFrame(
             const sensor_msgs::msg::PointCloud2::SharedPtr msg,
             LidarFrame &frame);
+
         void pushStateHistory(int64_t stamp_ns);
         bool filterCloudForGicp(
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &input,
             pcl::PointCloud<pcl::PointXYZ>::Ptr &output) const;
         bool interpolateState(
             int64_t stamp_ns, Eigen::Vector3d &p, Eigen::Quaterniond &q) const;
+        bool findAnchorState(
+            const int64_t stamp_ns,
+            StateSnapshot &anchor) const;
+        bool buildImuTrajectory(
+            const StateSnapshot &anchor, 
+            const int64_t t_start,
+            const int64_t t_end,
+            std::vector<ScanPoseSample> &traj) const;
+        bool lookupScanPose(
+            const std::vector<ScanPoseSample> &traj,
+            const int64_t stamp_ns,
+            Eigen::Vector3d &p,
+            Eigen::Quaterniond &q) const;
+
         bool applyGicpTranslationDeskew(
             const LidarFrame &frame,
             const Eigen::Matrix4d &prev_to_current,
@@ -303,6 +334,10 @@ namespace nav_data_handle {
         Eigen::Matrix3d R_lidar_to_body_;           // 雷达系 → 车体系旋转
         std::deque<StateSnapshot> state_history_;
         mutable std::mutex state_history_mtx_;
+
+        // imu历史队列
+        std::deque<ImuSample> imu_history_;
+        mutable std::mutex imu_history_mtx_;
 
         // 保护名义状态 p_/v_/q_ 在 IMU 线程和 lidar 线程之间的读写
         mutable std::mutex state_mtx_;

@@ -1030,23 +1030,30 @@ $$\Delta t = \frac{t_{ms}(k) - t_{ms}(k-1)}{1000}$$
 
 #### 14.2.1 问题背景
 
-MID360 的 `/livox/lidar/pointcloud` 一帧扫描持续约 `100ms`。若车辆在这 `100ms` 内发生旋转，则该帧点云不是单一刚体姿态下的观测，而是：
+MID360 的 `/livox/lidar/pointcloud` 一帧扫描持续约 `100ms`。若车辆在这段时间内发生边走边转，则一帧点云不再对应同一个刚体位姿，而是由多个采样时刻的点共同组成：
 
 $$\mathcal{P} = \{ \mathbf{p}(t_i) \mid t_i \in [t_{start}, t_{end}] \}$$
 
-原实现将整帧点云直接转为 `pcl::PointXYZ` 并送入 GICP，相当于假设：
+若直接把整帧点云当成同一时刻的刚体观测送入 GICP，相当于假设：
 
 $$\mathbf{T}(t_i) = \mathbf{T}(t_{ref}), \quad \forall i$$
 
 该假设在静止时近似成立，但在转弯或轻微 yaw 抖动时会失效，表现为：
 
-1. 直走时 GICP 逐渐给出虚假偏航
-2. 转弯时 GICP 旋转量偏小或偏斜
-3. 调高 IMU 权重会“转不到位”，调高 GICP 权重又会“直走倾斜”
+1. 转弯时点云出现拖影或滞后
+2. GICP 的 yaw residual 在边走边转时变大
+3. scan-to-scan 或 scan-to-submap 的刚体配准前提被破坏
+4. 打开后验平移 deskew 后，若轨迹来源不可靠，可能进一步放大误差
+
+因此，本轮修复方向从原来的“ESKF 历史姿态插值做旋转 deskew，GICP 通过后再补平移”调整为更接近 DLIO 的思路：
+
+$$\text{IMU scan 内连续时间轨迹} \rightarrow \text{逐点 6DoF deskew} \rightarrow \text{GICP}$$
+
+当前已经完成的是连续时间轨迹相关基础设施，尚未把 `parseLidarFrame()` 的实际 deskew 主路径切换到该轨迹。
 
 #### 14.2.2 每点时间解析
 
-修复后的 `parseLidarFrame()` 会手动解析 `PointCloud2` 字段，而不再直接用 `pcl::fromROSMsg`。原因是原始点云中包含每点 `timestamp` 字段，直接转 `PointXYZ` 会丢失该信息。
+`parseLidarFrame()` 手动解析 `PointCloud2` 字段，而不直接使用 `pcl::fromROSMsg`。原因是原始点云中包含每点 `timestamp/time/offset_time` 字段，直接转成 `PointXYZ` 会丢失每点采样时间。
 
 对第 $i$ 个点，读取：
 
@@ -1062,19 +1069,110 @@ $$t_{ref} = t_{max}$$
 
 即将整帧点云 deskew 到扫描末端时刻。
 
-#### 14.2.3 状态历史与时间插值
+#### 14.2.3 状态历史扩展
 
-为支持 deskew，系统维护 ESKF 状态历史：
+原先状态历史只保存：
 
-$$\mathcal{H} = \{ (t_k, \mathbf{p}_k, \mathbf{q}_k) \}$$
+$$\mathcal{H}_{old} = \{ (t_k, \mathbf{p}_k, \mathbf{q}_k) \}$$
 
-其中每个元素来自 IMU 回调结束后的融合状态，而非 GICP 单独解算结果。
+这只能支持按时间插值位置和姿态，不足以构建 scan 内连续运动轨迹。本轮已将 `StateSnapshot` 扩展为：
 
-给定任意点时间 $t_i$，用 `interpolateState()` 从历史中求出：
+$$\mathcal{H}_{state} = \{ (t_k, \mathbf{p}_k, \mathbf{v}_k, \mathbf{q}_k, \mathbf{b}_{a,k}, \mathbf{b}_{g,k}) \}$$
 
-$$\mathbf{p}(t_i), \mathbf{q}(t_i)$$
+对应代码字段：
 
-位置采用线性插值，姿态采用四元数球面插值 `slerp`：
+```cpp
+struct StateSnapshot {
+    int64_t stamp_ns;
+    Eigen::Vector3d p;
+    Eigen::Quaterniond q;
+    Eigen::Vector3d v;
+    Eigen::Vector3d b_a;
+    Eigen::Vector3d b_g;
+};
+```
+
+`pushStateHistory()` 在 IMU 回调完成 predict 和观测更新后写入当前名义状态，为后续 scan trajectory 找 anchor 状态提供依据。
+
+#### 14.2.4 IMU 历史缓存
+
+为避免仅依赖稀疏状态插值，本轮新增 `ImuSample` 历史：
+
+```cpp
+struct ImuSample {
+    int64_t stamp_ns;
+    Eigen::Vector3d acc_body;
+    Eigen::Vector3d gyro_body;
+};
+```
+
+IMU 回调中，在低通滤波和零偏补偿后，将 IMU 测量旋转到车体系并写入 `imu_history_`：
+
+$$\mathbf{a}_{body} = \mathbf{R}_{imu}^{body}(\mathbf{a}_{filtered} - \mathbf{b}_a)$$
+
+$$\boldsymbol{\omega}_{body} = \mathbf{R}_{imu}^{body}(\boldsymbol{\omega}_{filtered} - \mathbf{b}_g)$$
+
+该缓存使用独立的 `imu_history_mtx_` 保护，并按 `state_history_duration_` 清理旧数据。后续 `buildImuTrajectory()` 会从该缓存中取出覆盖当前 scan 时间段的 IMU 样本。
+
+#### 14.2.5 Anchor 状态选择
+
+连续时间轨迹不能直接从 `t_start` 假设已有状态。如果 anchor 状态时间戳不等于 scan 起点，需要先从 anchor 传播到 `t_start`。
+
+因此新增 `findAnchorState()`，从 `state_history_` 中寻找：
+
+$$t_{anchor} \le t_{start}$$
+
+且尽量靠近 `t_start` 的状态：
+
+$$\mathbf{x}_{anchor} = (\mathbf{p}_{anchor}, \mathbf{v}_{anchor}, \mathbf{q}_{anchor})$$
+
+这样 `buildImuTrajectory()` 的传播时间范围实际是：
+
+$$[t_{anchor}, t_{end}]$$
+
+而不是只取：
+
+$$[t_{start}, t_{end}]$$
+
+否则当 `t_anchor != t_start` 时，轨迹的时间原点会错位。
+
+#### 14.2.6 Scan 内 IMU 轨迹构建
+
+本轮新增 `ScanPoseSample`：
+
+```cpp
+struct ScanPoseSample {
+    int64_t stamp_ns;
+    Eigen::Vector3d p;
+    Eigen::Quaterniond q;
+    Eigen::Vector3d v;
+};
+```
+
+`buildImuTrajectory()` 当前实现目标：
+
+1. 输入 anchor 状态、`t_start`、`t_end`
+2. 从 `imu_history_` 拷贝 `(t_anchor, t_end]` 范围内的 IMU 样本
+3. 从 anchor 状态开始，按 IMU 时间顺序传播
+4. 当传播跨过 `t_start` 时，插入第一个 scan 轨迹点
+5. 后续每个 IMU 样本时刻写入一个 `ScanPoseSample`
+6. 若最后一个 IMU 样本早于 `t_end`，用最后一条 IMU 近似传播到 `t_end`
+
+传播模型与主 ESKF predict 保持一致：
+
+$$\mathbf{a}_{world} = \mathbf{R}(\mathbf{q})\mathbf{a}_{body} + \mathbf{g}$$
+
+$$\mathbf{p}_{k+1} = \mathbf{p}_k + \mathbf{v}_k\Delta t + \frac{1}{2}\mathbf{a}_{world}\Delta t^2$$
+
+$$\mathbf{v}_{k+1} = \mathbf{v}_k + \mathbf{a}_{world}\Delta t$$
+
+$$\mathbf{q}_{k+1} = \mathbf{q}_k \otimes \Delta \mathbf{q}(\boldsymbol{\omega}_{body}\Delta t)$$
+
+这里的轨迹不是最终滤波状态，只用于一帧 LiDAR 内部的点云去畸变。
+
+#### 14.2.7 Scan 轨迹查询
+
+本轮新增 `lookupScanPose()`，用于在 `std::vector<ScanPoseSample>` 中按时间查询任意点对应的局部 pose：
 
 $$\mathbf{p}(t) = (1 - \alpha)\mathbf{p}_a + \alpha\mathbf{p}_b$$
 
@@ -1084,37 +1182,47 @@ $$\mathbf{q}(t) = \operatorname{slerp}(\mathbf{q}_a, \mathbf{q}_b, \alpha)$$
 
 $$\alpha = \frac{t - t_a}{t_b - t_a}$$
 
-对 LiDAR 实时回调早于 IMU 缓存末端的情况，允许最多 `150ms` 的小外推，以覆盖扫描末端时刻。
+注意：这里仍然存在局部插值，但它发生在高频 IMU propagation 得到的 scan 内轨迹样本之间，不再是直接在稀疏 ESKF 状态历史上逐点查询。
 
-#### 14.2.4 旋转 deskew 实现
+#### 14.2.8 当前未完成部分
 
-当前默认只启用**旋转去畸变**，不启用平移去畸变。原因是短时姿态由陀螺积分提供，精度通常高于短时位置积分；若直接引入平移补偿，误差更容易由加速度噪声放大。
+截至当前记录，`parseLidarFrame()` 尚未切换到新的 scan trajectory 主路径。也就是说：
 
-对每个点：
+- `ImuSample`
+- `ScanPoseSample`
+- `findAnchorState()`
+- `buildImuTrajectory()`
+- `lookupScanPose()`
 
-1. 点先从 LiDAR 系转到车体系
+这些基础设施已经写入代码，但实际点云 deskew 仍然使用旧路径：
+
+$$\text{state\_history 插值} \rightarrow \text{旋转 deskew}$$
+
+当前还没有完成：
+
+1. 在 `parseLidarFrame()` 中调用 `findAnchorState()`
+2. 在 `parseLidarFrame()` 中调用 `buildImuTrajectory()`
+3. 使用 `lookupScanPose()` 获取 `t_i` 和 `t_{ref}` 的 pose
+4. 将每个点执行完整 6DoF deskew：
 
 $$\mathbf{p}_i^{body} = \mathbf{R}_{lidar}^{body}\mathbf{p}_i^{lidar}$$
 
-2. 用采样时刻姿态转到世界系
+$$\mathbf{p}_i^{world} = \mathbf{R}(\mathbf{q}(t_i))\mathbf{p}_i^{body} + \mathbf{p}(t_i)$$
 
-$$\mathbf{p}_i^{world} = \mathbf{R}(\mathbf{q}(t_i))\mathbf{p}_i^{body}$$
+$$\mathbf{p}_{i \rightarrow ref}^{body} =
+\mathbf{R}(\mathbf{q}(t_{ref}))^T
+(\mathbf{p}_i^{world} - \mathbf{p}(t_{ref}))$$
 
-3. 再用参考时刻姿态转回参考车体系
+$$\mathbf{p}_{i \rightarrow ref}^{lidar} =
+(\mathbf{R}_{lidar}^{body})^T\mathbf{p}_{i \rightarrow ref}^{body}$$
 
-$$\mathbf{p}_{i \rightarrow ref}^{body} = \mathbf{R}(\mathbf{q}(t_{ref}))^T \mathbf{p}_i^{world}$$
+5. 停用或移除 `applyGicpTranslationDeskew()` 这条 GICP 后验补偿路径
 
-4. 最后转回参考 LiDAR 系
+#### 14.2.9 当前状态判断
 
-$$\mathbf{p}_{i \rightarrow ref}^{lidar} = (\mathbf{R}_{lidar}^{body})^T \mathbf{p}_{i \rightarrow ref}^{body}$$
+本轮修复目前完成到“连续时间轨迹基础设施”阶段，还没有完成真正的 GICP 前 6DoF deskew。下一步应优先把 `parseLidarFrame()` 的 deskew 主体从旧的 `interpolateState()` 切换到 scan trajectory。
 
-于是整帧点云被统一到同一参考姿态下，恢复 GICP 所要求的“单刚体帧”近似。
-
-#### 14.2.5 设计理由
-
-GICP 的前提是源点云与目标点云分别来自两个刚体位姿。deskew 的作用不是替代 GICP，而是恢复这一前提。
-
-换言之，deskew 解决的是“一帧内部不一致”，GICP 解决的是“两帧之间怎么变换”。
+在完成切换前，系统的点云运动畸变表现仍然主要由旧的旋转 deskew 决定。
 
 ### 14.3 双线程与防积压修复
 
