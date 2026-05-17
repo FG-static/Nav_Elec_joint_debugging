@@ -179,7 +179,6 @@ lidar.enable_gicp_local_submap: true
 
 ```yaml
 lidar.enable_deskew: true
-lidar.deskew_translation: false
 lidar.state_history_duration: 1.5
 ```
 
@@ -245,4 +244,3 @@ ros2 topic echo /gicp/yaw_debug
 ```bash
 colcon build --packages-select my_nav2_robot
 ```
-

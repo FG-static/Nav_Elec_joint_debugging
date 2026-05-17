@@ -218,6 +218,10 @@ namespace nav_data_handle {
         bool parseLidarFrame(
             const sensor_msgs::msg::PointCloud2::SharedPtr msg,
             LidarFrame &frame);
+        bool deskewCloud(
+            LidarFrame &frame,
+            const std::vector<ScanPoseSample> &ext_traj,
+            bool deskew_translation) const;
 
         void pushStateHistory(int64_t stamp_ns);
         bool filterCloudForGicp(

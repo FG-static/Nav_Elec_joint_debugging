@@ -1,297 +1,235 @@
-# PLAN
+# Plan: GICP 迭代校正 deskew 轨迹
 
-## 目标
+## Context
 
-将当前项目的点云去畸变流程，从“ESKF 历史姿态旋转 deskew + GICP 通过后补平移 deskew”，逐步改成更接近 DLIO 的“基于 scan 内连续时间运动轨迹的 6DoF deskew，再做 GICP”。
+首次 deskew 已经固定为从 `frame.raw_cloud` 出发，使用 IMU scan trajectory 做 rotation-only deskew。
+下一步目标是在第一次 GICP 成功后，用 GICP 与 IMU 预测之间的相对运动残差校正 scan 内轨迹，
+再从 `frame.raw_cloud` 重新 deskew 一次并重跑 GICP。
 
-本计划只针对最小可落地版本，不一次性重构成完整 DLIO。第一阶段目标是先解决边走边转时的点云畸变和角度误差放大问题，并尽量保持现有 ESKF、GICP 门控和 local submap 结构不变。
+这个 plan 不改变 ESKF 主状态，只改 LiDAR 当前帧的 deskew 输入和 GICP 当前帧观测。
 
-## 当前实现概况
+## 必须保持的约束
 
-- 当前主入口在 `src/my_nav2_robot/src/data_handle.cpp`
-- 当前点云处理流程：
-  - `parseLidarFrame()` 解析点云并做旋转 deskew
-  - `estimateLidarMotion()` 用状态历史给 GICP 初值
-  - `estimate_motion_with_gicp()` 做 scan-to-prev / scan-to-local-submap 配准
-  - `applyGicpTranslationDeskew()` 在 GICP 成功后做补偿式平移 deskew
-- 当前状态历史只保存 `p/q`，不具备 scan 内连续时间轨迹表达能力
+- `deskewCloud()` 必须继续从 `frame.raw_cloud` 读点，禁止从已 deskew 的 `frame.cloud` 叠加处理。
+- IMU-only 首次 deskew 继续使用 `deskewCloud(frame, traj, false)`，禁止启用平移 deskew。
+- 二次 deskew 只在 GICP 第一次结果通过基础验证后执行，使用 `deskewCloud(frame, corrected_traj, true)`。
+- 二次 GICP 的 `score`、transform finite/determinant、速度/yaw gate 必须和一次 GICP 走同一套验证逻辑。
+- 最终用于 GICP、history、local submap、map update 的 cloud 必须一致。
 
-## 第一阶段原则
+## GICP T 约定
 
-- 先把完整 6DoF deskew 前移到 GICP 之前
-- 先保留现有 GICP 门控、local submap、ESKF 框架
-- 暂不同时引入 keyframe map、pose graph、回环优化
-- 一次只替换一层，避免多个变量同时变化导致无法诊断
+当前代码已经把 `T` 作为后续速度观测和 map 更新的统一变换使用：
 
-## 任务清单
+- frame-to-frame 分支：
+  `T = estimate_motion_with_gicp(prev_cloud_, cloud_for_gicp, score, aligned_cloud)`
+- local-submap 分支：
+  `current_to_submap = estimate_motion_with_gicp(cloud_for_gicp, local_submap_cloud, ...)`
+  `T = current_to_submap.inverse() * prev_to_submap`
 
-### 1. 扩展状态历史数据
+后续代码对 `T` 的使用方式：
 
-需要修改：
+- `v_icp = T.translation() / lidar_dt`
+- `updateGicpMap(cloud_for_gicp, T, stamp)`，内部再取 `T.inverse()` 得到 current-to-prev
+- `insert_current_to_submap = insert_prev_to_submap * T.inverse()`
 
-- `src/my_nav2_robot/include/my_nav2_robot/data_handle.hpp`
-- `src/my_nav2_robot/src/data_handle.cpp`
+因此本轮实现必须沿用现有语义：**`T_gicp` 就是当前代码认可的 prev/current 相对运动观测，不再额外取
+`T.inverse()` 作为“真实运动”**。如果后续要彻底重命名方向，必须连速度符号、yaw 符号、map update 一起改，
+不能只在 deskew 迭代里反向。
 
-具体内容：
+## 改动 1: 保存首次 IMU scan trajectory
 
-- 扩展 `StateSnapshot`
-- 在当前的 `stamp_ns / p / q` 基础上，至少增加：
-  - `v`
-  - `b_a`
-  - `b_g`
-- 可选增加：
-  - `acc_unbiased`
-  - `gyro_unbiased`
+在 `data_handle.hpp` 增加成员：
 
-目的：
+```cpp
+std::vector<ScanPoseSample> current_scan_traj_;
+```
 
-- 为 scan 内连续时间轨迹构建提供足够的状态量
+在 `parseLidarFrame()` 里显式构建首次 IMU trajectory 并保存，避免 `deskewCloud()` 内部构建后外部拿不到：
 
-### 2. 扩展状态历史写入逻辑
+```cpp
+current_scan_traj_.clear();
 
-需要修改：
+StateSnapshot anchor;
+if (findAnchorState(frame.min_point_stamp_ns, anchor) &&
+    buildImuTrajectory(
+        anchor, frame.min_point_stamp_ns, frame.max_point_stamp_ns,
+        current_scan_traj_)) {
 
-- `pushStateHistory()`
+    deskewCloud(frame, current_scan_traj_, false);
+} else {
 
-具体内容：
+    deskewCloud(frame, {}, false);
+}
+```
 
-- 当前只保存 `p_` 和 `q_`
-- 改为保存当前 ESKF 名义状态：
-  - `p_`
-  - `q_`
-  - `v_`
-  - `b_a_`
-  - `b_g_`
+注意：如果 `buildImuTrajectory()` 失败，`current_scan_traj_` 必须保持 empty，后续不得做二次 deskew。
 
-目的：
+## 改动 2: 增加 GICP 迭代参数
 
-- 让后续轨迹重建不再依赖简化的两端位姿
+增加参数 `lidar.gicp_iter_count`：
 
-### 3. 增加完整状态插值接口
+- `1`: 只跑当前一次 GICP，默认值，保持现有行为
+- `2`: 第一次 GICP 通过基础验证后，做一次 trajectory correction + re-deskew + 第二次 GICP
 
-需要修改：
+先默认 `1`。rosbag A/B 验证后再决定是否把默认值改成 `2`。
 
-- `interpolateState()`
-- 或新增 `interpolateStateFull()`
+## 改动 3: 用相对残差校正 scan trajectory
 
-具体内容：
+不要对整条轨迹左乘同一个刚体变换。那只是 world gauge 变化，deskew 依赖的 scan 内相对位姿会大部分抵消。
 
-- 保留现有 `p/q` 插值接口，避免影响旧逻辑
-- 新增一个返回完整状态的插值接口，用于：
-  - `p`
-  - `q`
-  - `v`
-  - `b_a`
-  - `b_g`
+新增方法建议签名：
 
-目的：
+```cpp
+bool correctScanTrajectoryWithGicp(
+    const Eigen::Matrix4d &T_gicp,
+    const std::vector<ScanPoseSample> &traj,
+    std::vector<ScanPoseSample> &corrected_traj) const;
+```
 
-- 给 scan trajectory 构造提供统一接口
+实现原则：
 
-### 4. 引入 scan 内轨迹数据结构
+1. 从 `traj.front()` 和 `traj.back()` 构造 body/world pose。
+2. 计算 IMU 预测的 scan 首尾相对运动，并转换到和 `T_gicp` 一致的 LiDAR frame 语义。
+3. 计算 GICP 相对运动相对 IMU 预测的残差 `T_residual`。
+4. 将 `T_residual` 按点时间比例从 0 到 1 分摊到 scan 内：
+   - 参考时刻残差为 identity。
+   - scan 另一端残差累积到 `T_residual`。
+   - 旋转用 quaternion slerp 或 SO(3) log/exp。
+   - 平移用线性插值即可，后续需要更严谨时再换 SE(3) log/exp。
+5. 把每个分摊残差转换回 body/world pose 后写入 `corrected_traj`。
 
-需要修改：
+比例定义必须和 `deskewCloud()` 的参考时刻一致。当前 deskew 参考时刻是 `frame.max_point_stamp_ns`，
+所以建议让 max stamp 的校正残差为 identity，让 min stamp 承担完整首尾残差，避免移动参考端。
 
-- `src/my_nav2_robot/include/my_nav2_robot/data_handle.hpp`
+伪代码结构：
 
-具体内容：
+```cpp
+// T_pred_lidar: IMU 轨迹预测出的 prev/current LiDAR 相对运动，语义必须与 T_gicp 一致。
+Eigen::Matrix4d T_pred_lidar = ...;
+Eigen::Matrix4d T_residual = T_gicp * T_pred_lidar.inverse();
 
-- 新增一个 scan 轨迹采样结构，例如：
-  - `stamp_ns`
-  - `p`
-  - `q`
-  - `v`
+for each sample:
+    double alpha = (frame.max_point_stamp_ns - sample.stamp_ns) / scan_duration_ns;
+    alpha = clamp(alpha, 0.0, 1.0);
 
-目的：
+    Eigen::Quaterniond q_res_i =
+        Eigen::Quaterniond::Identity().slerp(alpha, q_residual);
+    Eigen::Vector3d t_res_i = alpha * t_residual;
 
-- 将“状态历史”与“本帧点云内部轨迹”区分开
+    // 将 LiDAR frame 残差映射到该 sample 对应的 body/world pose 修正。
+    // 这里要显式处理 R_lidar_to_body_，不要把 lidar-frame T 直接左乘 world pose。
+```
 
-### 5. 新增 scan trajectory 构建函数
+实现时如果坐标系推导不够确定，先只做 rotation residual correction，平移残差保留但不启用；
+这比把错方向平移写进 trajectory 更安全。
 
-需要新增函数：
-
-- `buildScanTrajectory(const LidarFrame &frame, std::vector<ScanPoseSample> &traj)`
-
-建议位置：
-
-- `src/my_nav2_robot/src/data_handle.cpp`
-
-第一版实现要求：
-
-- 输入一帧 scan 的 `min_point_stamp_ns` 和 `max_point_stamp_ns`
-- 从状态历史中提取覆盖该时间段的状态
-- 生成一条 scan 内部可查询的连续轨迹
-
-第一版可以接受的简化：
-
-- 先做“稠密状态插值轨迹”
-- 不要求第一版就实现严格 IMU 重积分
-
-后续增强方向：
-
-- 基于 scan 内 IMU propagation 重建更真实的连续时间轨迹
-
-### 6. 统一 deskew 参考时刻
-
-需要明确的设计选择：
-
-- 全部点 deskew 到 `frame.max_point_stamp_ns`
-
-原因：
-
-- 与当前工程逻辑最接近
-- 可最小化对 GICP、观测融合和历史点云流程的改动
-
-要求：
-
-- `parseLidarFrame()`
-- GICP 输出解释
-- 观测对齐时刻
-
-以上都必须采用同一个参考时刻语义
-
-### 7. 重写 parseLidarFrame() 中的 deskew 主体
-
-需要修改：
-
-- `parseLidarFrame()`
-
-当前逻辑：
-
-- 每点读取 `q_i`
-- 只做旋转 deskew
-- 平移 deskew 被推迟到 `applyGicpTranslationDeskew()`
-
-目标逻辑：
-
-- 基于 scan trajectory，对每个点执行完整 6DoF deskew
-- 每个点都使用：
-  - 该点时刻的 `p_i / q_i`
-  - 参考时刻的 `p_ref / q_ref`
-
-核心计算流程：
-
-- `point_body = R_lidar_to_body_ * point_lidar`
-- `point_world = q_i * point_body + p_i`
-- `point_ref_body = q_ref.conjugate() * (point_world - p_ref)`
-- `point_ref_lidar = R_lidar_to_body_.transpose() * point_ref_body`
-
-注意事项：
-
-- 不要再只做旋转 deskew
-- 不要把平移 deskew 留到 GICP 之后
-
-### 8. deskew 过程中不要逐点直接查状态历史
-
-需要优化：
-
-- 避免在 `parseLidarFrame()` 中对每个点直接调用一次 `interpolateState()`
-
-建议做法：
-
-- 先构造 scan trajectory
-- 再按时间索引或局部插值查 `p_i / q_i`
-
-目的：
-
-- 降低逐点查表开销
-- 让 deskew 语义变成“scan 内连续轨迹”，而不是“离散历史点随用随查”
-
-### 9. 废弃补偿式平移 deskew 路径
-
-需要处理：
-
-- `applyGicpTranslationDeskew()`
-- `deskew_translation_`
-- `gicp_deskew_anchor_`
-
-第一阶段建议：
-
-- 停用 `applyGicpTranslationDeskew()` 主路径
-- 保留代码一段时间用于 A/B 对比，但不再作为默认流程
-
-原因：
-
-- 该路径属于“GICP 成功后补偿式 deskew”
-- 不符合 DLIO 的“先连续时间 6DoF deskew，再 GICP”思想
-
-### 10. 统一历史点云来源
-
-需要检查：
-
-- `cloud_for_gicp`
-- `cloud_for_history`
-- `prev_cloud_`
-- `prev_lidar_frame_.cloud`
-- local submap 插入逻辑
-- `/gicp/map_cloud` 发布逻辑
-
-目标：
-
-- 统一使用“完整 6DoF deskew 后”的点云
-- 不再混用：
-  - 原始 raw cloud
-  - 仅旋转 deskew cloud
-  - GICP 后补平移 deskew cloud
-
-### 11. 保留现有 GICP 初值和门控逻辑
-
-第一阶段先保留：
-
-- `estimateLidarMotion()`
-- `fitness` 门控
-- `velocity_gate`
-- `yaw_gate`
-- `velocity_valid`
-- `yaw_valid`
-- local submap 机制
-
-原因：
-
-- 第一阶段目的是隔离 deskew 对系统的影响
-- 避免同时修改太多因素导致无法判断收益来源
-
-### 12. 第二阶段再考虑的内容
-
-第一阶段完成后再评估是否需要继续做：
-
-- 将 local submap 从最近几帧滑窗改成 keyframe submap
-- 将 GICP 从“速度/yaw观测”升级成“pose 观测”
-- 用更严格的 IMU propagation 替代当前插值式 scan trajectory
-- 引入退化检测
-- 引入全局回环或图优化
-
-## 实施顺序
-
-建议按下面顺序进行：
-
-1. 扩展 `StateSnapshot`
-2. 扩展 `pushStateHistory()`
-3. 增加完整状态插值接口
-4. 新增 scan trajectory 数据结构
-5. 实现 `buildScanTrajectory()`
-6. 重写 `parseLidarFrame()`，完成 6DoF deskew
-7. 暂停 `applyGicpTranslationDeskew()` 主路径
-8. 统一 `prev_cloud_ / local submap / map cloud` 的点云来源
-9. 保持现有 GICP 和门控不变，进行 A/B 测试
-
-## 验证项目
-
-修改完成后重点观察：
-
-1. RViz 中转弯时 `/livox/lidar/pointcloud` 的拖影是否明显减少
-2. `/gicp/yaw_debug` 是否更平滑
-3. `/gicp/status` 中 reject 是否减少
-4. 绕圈回起点时的角度误差是否缩小
-5. 直走性能是否保持稳定，不出现新的系统性偏航
-
-## 风险点
-
-- 点时间戳字段语义不一致：绝对时间、相对时间、offset_time 需要统一确认
-- `R_lidar_to_body_` 外参一旦方向用错，6DoF deskew 会在转弯时明显恶化
-- 若 scan trajectory 参考时刻定义不统一，GICP 结果和滤波器时刻会错位
-- 如果一次性同时修改 deskew、submap 和 GICP 融合方式，将很难定位退化来源
-
-## 结论
-
-第一阶段不追求完整复刻 DLIO，而是先把当前项目从“后验补偿式 deskew”升级成“GICP 前的连续时间 6DoF deskew”。这是当前最有可能改善转弯畸变和角度误差的改动，也是对现有工程侵入最小的一条路径。
+## 改动 4: 抽出 GICP 单次运行与基础验证
+
+为了让第一次和第二次 GICP 走同一套基础验证，抽一个局部 lambda 或私有方法：
+
+```cpp
+struct GicpRunResult {
+    bool ok = false;
+    double score = 1e9;
+    Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
+    Eigen::Matrix4d current_to_submap = Eigen::Matrix4d::Identity();
+    pcl::PointCloud<pcl::PointXYZ>::Ptr aligned_cloud;
+};
+```
+
+`runGicpOnce(cloud)` 负责：
+
+- frame-to-frame 和 local-submap 两个分支都返回统一语义的 `T`
+- 复用已有 `gicp_init_guess_`
+- 检查 `score`、`lidar_dt`、`T.allFinite()`、rotation determinant
+- 失败时返回 `ok=false`，外层执行现有 clear/reset/status 逻辑
+
+第二次 GICP 只有在第一次 `ok=true` 后才允许执行。第二次如果失败：
+
+- 保守策略：回退第一次 GICP 结果和第一次 deskew cloud
+- 不用失败的二次结果更新观测、map、submap 或 history
+
+## 改动 5: `lidarCallback()` 迭代流程
+
+目标流程：
+
+```cpp
+auto first_cloud_full = frame.cloud;
+auto first_cloud_for_gicp = limitCloudIfNeeded(first_cloud_full);
+auto first_cloud_for_history = first_cloud_for_gicp;
+
+GicpRunResult best = runGicpOnce(first_cloud_for_gicp);
+auto final_cloud_for_gicp = first_cloud_for_gicp;
+auto final_cloud_for_history = first_cloud_for_history;
+
+if (best.ok &&
+    lidar_gicp_iter_count_ >= 2 &&
+    frame.deskewed &&
+    !current_scan_traj_.empty()) {
+
+    std::vector<ScanPoseSample> corrected_traj;
+    if (correctScanTrajectoryWithGicp(best.T, current_scan_traj_, corrected_traj) &&
+        deskewCloud(frame, corrected_traj, true)) {
+
+        auto second_cloud_for_gicp = limitCloudIfNeeded(frame.cloud);
+        GicpRunResult second = runGicpOnce(second_cloud_for_gicp);
+
+        if (second.ok) {
+            best = second;
+            final_cloud_for_gicp = second_cloud_for_gicp;
+            final_cloud_for_history = second_cloud_for_gicp;
+        } else {
+            frame.cloud = first_cloud_full;
+            final_cloud_for_gicp = first_cloud_for_gicp;
+            final_cloud_for_history = first_cloud_for_history;
+        }
+    }
+}
+
+// 后续 v_icp / yaw / observe / map / submap / prev_cloud_
+// 全部使用 best.T、best.score、final_cloud_for_gicp、final_cloud_for_history。
+```
+
+注意：
+
+- 二次 re-deskew 后必须重新走点数限制，不能直接把完整 `frame.cloud` 塞给 GICP。
+- `prev_cloud_`、`prev_lidar_frame_.cloud`、local submap 插入、`updateGicpMap()` 必须使用最终胜出的 cloud。
+- 如果二次失败并回退第一次，`frame.cloud` 也要恢复到 first deskew cloud，保证日志和 history 一致。
+
+## 改动 6: 日志与诊断
+
+增加节流日志，方便 rosbag 对比：
+
+- `gicp_iter_count`
+- first/second score
+- first/second cost ms
+- 是否采用 second result
+- second reject reason
+- re-deskew 是否成功
+
+原有 `ICP RESULT` 可以扩展为：
+
+```text
+ICP RESULT: score=... first_score=... iter=1/2 iter_used=0/1 ...
+```
+
+## 验证
+
+1. 静态检查：
+   - `deskewCloud()` 仍然只从 `frame.raw_cloud` 读点。
+   - IMU-only 首次 deskew 没有开启 translation。
+   - 二次 GICP 失败不会污染 `prev_cloud_`、map、local submap。
+2. 构建：
+   ```bash
+   source /opt/ros/jazzy/setup.bash
+   colcon build --packages-select my_nav2_robot
+   ```
+3. rosbag A/B：
+   - `lidar.gicp_iter_count=1` vs `2`
+   - GICP reject 率
+   - first/second score 分布
+   - `gicp` 耗时和 dropped scan 数
+   - 转弯段轨迹平滑度
+   - 一圈闭环误差
+4. 安全回归：
+   - 高速转弯、原地旋转、点云缺 timestamp、IMU trajectory 构建失败、local submap 开/关都要覆盖。

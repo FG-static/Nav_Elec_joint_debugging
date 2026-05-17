@@ -1372,7 +1372,7 @@ namespace nav_data_handle {
             const double ratio = span > 0.0 ?
                 static_cast<double>(stamp_ns - prev.stamp_ns) / span : 0.0;
             p = (1.0 - ratio) * prev.p + ratio * next.p;
-            q = prev.q.slerp(ratio, next.q).normalized();
+            q = prev.q.normalized().slerp(ratio, next.q.normalized()).normalized();
             return true;
         }
         return false;
@@ -1916,9 +1916,29 @@ namespace nav_data_handle {
             frame.max_point_stamp_ns = frame.stamp_ns;
         }
 
-        if (!enable_lidar_deskew_ || !frame.has_point_time || frame.cloud->empty()) {
-            
-            return true;
+        deskewCloud(frame, {}, false);
+        return true;
+    }
+
+    bool NavDataHandle::deskewCloud(
+        LidarFrame &frame,
+        const std::vector<ScanPoseSample> &ext_traj,
+        bool deskew_translation
+    ) const {
+
+        // 有效性檢查
+        frame.deskewed = false;
+        if (!enable_lidar_deskew_ || !frame.has_point_time ||
+            !frame.raw_cloud || frame.raw_cloud->empty()) {
+
+            return false;
+        }
+        if (frame.point_stamps.size() != frame.raw_cloud->points.size()) {
+
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "deskew 点时间戳数量与原始点云数量不一致，使用原始点云");
+            return false;
         }
 
         const double scan_duration =
@@ -1928,60 +1948,122 @@ namespace nav_data_handle {
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 2000,
                 "deskew scan 时长异常 %.3fs，使用原始点云", scan_duration);
-            return true;
+            return false;
         }
 
-        StateSnapshot anchor;
-        if (!findAnchorState(frame.min_point_stamp_ns, anchor)) {
+        std::vector<ScanPoseSample> local_traj;
+        const std::vector<ScanPoseSample> *traj_ptr = nullptr;
+
+        // 畸變處理
+        if (!ext_traj.empty()) {
+
+            traj_ptr = &ext_traj;
+        } else {
+
+            deskew_translation = false;
+            StateSnapshot anchor;
+            if (!findAnchorState(frame.min_point_stamp_ns, anchor)) {
+
+                RCLCPP_WARN_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 2000,
+                    "deskew 缺少 scan 起点前 ESKF 状态，使用原始点云");
+                return false;
+            }
+            if (!buildImuTrajectory(
+                    anchor, frame.min_point_stamp_ns, frame.max_point_stamp_ns, local_traj)) {
+
+                RCLCPP_WARN_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 2000,
+                    "deskew 无法构造 scan 内 IMU 轨迹，使用原始点云");
+                return false;
+            }
+            traj_ptr = &local_traj;
+        }
+
+        auto validate_traj = [&](const std::vector<ScanPoseSample> &traj) {
+
+            if (traj.empty() ||
+                traj.front().stamp_ns > frame.min_point_stamp_ns ||
+                traj.back().stamp_ns < frame.max_point_stamp_ns) {
+
+                return false;
+            }
+
+            int64_t prev_stamp_ns = std::numeric_limits<int64_t>::min();
+            for (const auto &sample : traj) {
+
+                if (sample.stamp_ns <= prev_stamp_ns ||
+                    !sample.p.allFinite() || !sample.q.coeffs().allFinite()) {
+
+                    return false;
+                }
+                const double q_norm = sample.q.norm();
+                if (!std::isfinite(q_norm) || q_norm <= 1.0e-12) {
+
+                    return false;
+                }
+                prev_stamp_ns = sample.stamp_ns;
+            }
+            return true;
+        };
+
+        if (!validate_traj(*traj_ptr)) {
 
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 2000,
-                "deskew 缺少 scan 起点前 ESKF 状态，使用原始点云");
-            return true;
-        }
-
-        std::vector<ScanPoseSample> scan_traj;
-        if (!buildImuTrajectory(
-                anchor, frame.min_point_stamp_ns, frame.max_point_stamp_ns, scan_traj)) {
-
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(), *this->get_clock(), 2000,
-                "deskew 无法构造 scan 内 IMU 轨迹，使用原始点云");
-            return true;
+                "deskew scan trajectory 无效或未覆盖整帧点云，使用原始点云");
+            return false;
         }
 
         Eigen::Vector3d p_ref;
         Eigen::Quaterniond q_ref;
-        if (!lookupScanPose(scan_traj, frame.max_point_stamp_ns, p_ref, q_ref)) {
+        if (!lookupScanPose(*traj_ptr, frame.max_point_stamp_ns, p_ref, q_ref)) {
 
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 2000,
                 "deskew 缺少参考时刻 scan pose，使用原始点云");
-            return true;
+            return false;
         }
 
+        auto deskewed_cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        deskewed_cloud->reserve(frame.raw_cloud->points.size());
         bool all_points_deskewed = true;
-        for (size_t i = 0; i < frame.cloud->points.size(); i ++) {
+        for (size_t i = 0; i < frame.raw_cloud->points.size(); i ++) {
 
             Eigen::Vector3d p_i;
             Eigen::Quaterniond q_i;
-            if (!lookupScanPose(scan_traj, frame.point_stamps[i], p_i, q_i)) {
+            if (!lookupScanPose(*traj_ptr, frame.point_stamps[i], p_i, q_i)) {
 
                 all_points_deskewed = false;
+                deskewed_cloud->points.push_back(frame.raw_cloud->points[i]);
                 continue;
             }
 
-            const auto &src = frame.cloud->points[i];
+            const auto &src = frame.raw_cloud->points[i];
             Eigen::Vector3d point_lidar(src.x, src.y, src.z);
             Eigen::Vector3d point_body = R_lidar_to_body_ * point_lidar;
-            Eigen::Vector3d point_ref_body = q_ref.conjugate() * (q_i * point_body);
+            Eigen::Vector3d point_ref_body;
+            if (deskew_translation) {
+
+                const Eigen::Vector3d point_world = q_i * point_body + p_i;
+                point_ref_body = q_ref.conjugate() * (point_world - p_ref);
+            } else {
+
+                point_ref_body = q_ref.conjugate() * (q_i * point_body);
+            }
             Eigen::Vector3d point_ref_lidar = R_lidar_to_body_.transpose() * point_ref_body;
 
-            frame.cloud->points[i].x = static_cast<float>(point_ref_lidar.x());
-            frame.cloud->points[i].y = static_cast<float>(point_ref_lidar.y());
-            frame.cloud->points[i].z = static_cast<float>(point_ref_lidar.z());
+            pcl::PointXYZ dst;
+            dst.x = static_cast<float>(point_ref_lidar.x());
+            dst.y = static_cast<float>(point_ref_lidar.y());
+            dst.z = static_cast<float>(point_ref_lidar.z());
+            deskewed_cloud->points.push_back(dst);
         }
 
+        deskewed_cloud->width = static_cast<uint32_t>(deskewed_cloud->points.size());
+        deskewed_cloud->height = 1;
+        deskewed_cloud->is_dense = true;
+        frame.cloud = deskewed_cloud;
         frame.deskewed = all_points_deskewed;
         if (!all_points_deskewed) {
 
