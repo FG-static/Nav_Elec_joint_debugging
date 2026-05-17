@@ -207,7 +207,6 @@ namespace nav_data_handle {
         this->declare_parameter("lidar.publish_aligned_cloud", false);
         this->declare_parameter("lidar.max_points_before_gicp", 0);
         this->declare_parameter("lidar.enable_deskew", true);
-        this->declare_parameter("lidar.deskew_translation", false);
         this->declare_parameter("lidar.state_history_duration", 3.0);
         this->declare_parameter("lidar.max_range", 80.0);
         this->declare_parameter("lidar.min_voxel_leaf_size", 0.05);
@@ -232,7 +231,6 @@ namespace nav_data_handle {
         publish_aligned_cloud_ = this->get_parameter("lidar.publish_aligned_cloud").as_bool();
         max_points_before_gicp_ = this->get_parameter("lidar.max_points_before_gicp").as_int();
         enable_lidar_deskew_ = this->get_parameter("lidar.enable_deskew").as_bool();
-        deskew_translation_ = this->get_parameter("lidar.deskew_translation").as_bool();
         state_history_duration_ =
             this->get_parameter("lidar.state_history_duration").as_double();
         lidar_max_range_ = this->get_parameter("lidar.max_range").as_double();
@@ -363,11 +361,11 @@ namespace nav_data_handle {
             this->get_logger(),
             "ESKF 参数已加载: P=%.6f, Q=%.6f, Q_bias=[%.8f %.8f], "
             "R=[%.6f %.6f %.6f %.6f], R_tilt=[%.6f %.6f], calibration=%.2fs, "
-            "deskew=%d translation=%d",
+            "deskew=%d",
             P_init, Q_init, q_b_a, q_b_g,
             r_11, r_22, r_33, r_44,
             r_tilt_11, r_tilt_22, calibration_duration_,
-            enable_lidar_deskew_, deskew_translation_);
+            enable_lidar_deskew_);
     }
 
     void NavDataHandle::gimbalCallBack(
@@ -1502,98 +1500,6 @@ namespace nav_data_handle {
         return false;
     }
 
-    bool NavDataHandle::applyGicpTranslationDeskew(
-        const LidarFrame &frame,
-        const Eigen::Matrix4d &prev_to_current,
-        int64_t current_stamp_ns,
-        pcl::PointCloud<pcl::PointXYZ>::Ptr &corrected_cloud
-    ) {
-
-        corrected_cloud.reset();
-        if (!deskew_translation_ || !frame.raw_cloud || frame.raw_cloud->empty() ||
-            frame.point_stamps.size() != frame.raw_cloud->points.size() ||
-            !prev_to_current.allFinite() || current_stamp_ns <= 0 ||
-            prev_lidar_frame_.max_point_stamp_ns <= 0 ||
-            current_stamp_ns <= prev_lidar_frame_.max_point_stamp_ns) {
-
-            return false;
-        }
-
-        if (!gicp_deskew_anchor_.ready ||
-            gicp_deskew_anchor_.stamp_ns != prev_lidar_frame_.max_point_stamp_ns) {
-
-            Eigen::Vector3d p_prev;
-            Eigen::Quaterniond q_prev;
-            if (!interpolateState(prev_lidar_frame_.max_point_stamp_ns, p_prev, q_prev)) {
-
-                return false;
-            }
-            gicp_deskew_anchor_.ready = true;
-            gicp_deskew_anchor_.stamp_ns = prev_lidar_frame_.max_point_stamp_ns;
-            gicp_deskew_anchor_.p = p_prev;
-            gicp_deskew_anchor_.q = q_prev.normalized();
-        }
-
-        const Eigen::Vector3d body_delta =
-            R_lidar_to_body_ * prev_to_current.block<3, 1>(0, 3);
-        const Eigen::Vector3d p_ref =
-            gicp_deskew_anchor_.p + gicp_deskew_anchor_.q * body_delta;
-
-        Eigen::Matrix3d R_icp_body =
-            R_lidar_to_body_ * prev_to_current.block<3, 3>(0, 0) *
-            R_lidar_to_body_.transpose();
-        const double delta_yaw =
-            -std::atan2(R_icp_body(1, 0), R_icp_body(0, 0));
-        const Eigen::Quaterniond q_ref =
-            (gicp_deskew_anchor_.q *
-             Eigen::Quaterniond(Eigen::AngleAxisd(delta_yaw, Eigen::Vector3d::UnitZ()))
-            ).normalized();
-
-        corrected_cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        corrected_cloud->reserve(frame.raw_cloud->size());
-        const double duration =
-            static_cast<double>(current_stamp_ns - gicp_deskew_anchor_.stamp_ns);
-
-        for (size_t i = 0; i < frame.raw_cloud->points.size(); i ++) {
-
-            double ratio =
-                static_cast<double>(frame.point_stamps[i] - gicp_deskew_anchor_.stamp_ns) /
-                duration;
-            ratio = std::clamp(ratio, 0.0, 1.0);
-            Eigen::Vector3d p_i =
-                gicp_deskew_anchor_.p + ratio * (p_ref - gicp_deskew_anchor_.p);
-            Eigen::Quaterniond q_i =
-                gicp_deskew_anchor_.q.slerp(ratio, q_ref).normalized();
-
-            const auto &src = frame.raw_cloud->points[i];
-            Eigen::Vector3d point_lidar(src.x, src.y, src.z);
-            Eigen::Vector3d point_body = R_lidar_to_body_ * point_lidar;
-            Eigen::Vector3d point_world = q_i * point_body + p_i;
-            Eigen::Vector3d point_ref_body = q_ref.conjugate() * (point_world - p_ref);
-            Eigen::Vector3d point_ref_lidar = R_lidar_to_body_.transpose() * point_ref_body;
-
-            pcl::PointXYZ point;
-            point.x = static_cast<float>(point_ref_lidar.x());
-            point.y = static_cast<float>(point_ref_lidar.y());
-            point.z = static_cast<float>(point_ref_lidar.z());
-            if (pcl::isFinite(point)) corrected_cloud->points.push_back(point);
-        }
-
-        corrected_cloud->width = static_cast<uint32_t>(corrected_cloud->points.size());
-        corrected_cloud->height = 1;
-        corrected_cloud->is_dense = true;
-        if (corrected_cloud->size() < 10) {
-
-            corrected_cloud.reset();
-            return false;
-        }
-
-        gicp_deskew_anchor_.stamp_ns = current_stamp_ns;
-        gicp_deskew_anchor_.p = p_ref;
-        gicp_deskew_anchor_.q = q_ref.normalized();
-        return true;
-    }
-
     Eigen::Matrix4d NavDataHandle::bodyToLidarTransform(
         const Eigen::Matrix4d &body_tf
     ) const {
@@ -1916,12 +1822,15 @@ namespace nav_data_handle {
         frame.cloud->reserve(point_count);
         frame.point_stamps.reserve(point_count);
 
+        // 座標讀取
         auto read_float = [&](size_t point_offset, uint32_t field_offset) {
             
             float value = 0.0F;
             std::memcpy(&value, &msg->data[point_offset + field_offset], sizeof(float));
             return value;
         };
+
+        // 時間戳推斷
         auto read_point_time = [&](size_t point_offset) -> int64_t {
             
             if (!time_field) return frame.stamp_ns;
@@ -1948,6 +1857,13 @@ namespace nav_data_handle {
             }
 
             if (!std::isfinite(value)) return frame.stamp_ns;
+
+            if (time_field->name == "offset_time") {
+
+                // Livox PointCloud2 的 offset_time 是相对 header.stamp 的纳秒偏移。
+                // 不走通用量纲猜测，避免 scan 起始处小于 1e6ns 的点被误判为微秒。
+                return frame.stamp_ns + static_cast<int64_t>(std::llround(value));
+            }
 
             const double as_abs_ns = value;
             const double as_abs_sec = value * 1e9;
@@ -2005,13 +1921,42 @@ namespace nav_data_handle {
             return true;
         }
 
-        Eigen::Vector3d p_ref;
-        Eigen::Quaterniond q_ref;
-        if (!interpolateState(frame.max_point_stamp_ns, p_ref, q_ref)) {
+        const double scan_duration =
+            static_cast<double>(frame.max_point_stamp_ns - frame.min_point_stamp_ns) * 1e-9;
+        if (!std::isfinite(scan_duration) || scan_duration <= 0.0 || scan_duration > 0.25) {
 
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 2000,
-                "deskew 缺少参考时刻 IMU 状态，使用原始点云");
+                "deskew scan 时长异常 %.3fs，使用原始点云", scan_duration);
+            return true;
+        }
+
+        StateSnapshot anchor;
+        if (!findAnchorState(frame.min_point_stamp_ns, anchor)) {
+
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "deskew 缺少 scan 起点前 ESKF 状态，使用原始点云");
+            return true;
+        }
+
+        std::vector<ScanPoseSample> scan_traj;
+        if (!buildImuTrajectory(
+                anchor, frame.min_point_stamp_ns, frame.max_point_stamp_ns, scan_traj)) {
+
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "deskew 无法构造 scan 内 IMU 轨迹，使用原始点云");
+            return true;
+        }
+
+        Eigen::Vector3d p_ref;
+        Eigen::Quaterniond q_ref;
+        if (!lookupScanPose(scan_traj, frame.max_point_stamp_ns, p_ref, q_ref)) {
+
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "deskew 缺少参考时刻 scan pose，使用原始点云");
             return true;
         }
 
@@ -2020,7 +1965,7 @@ namespace nav_data_handle {
 
             Eigen::Vector3d p_i;
             Eigen::Quaterniond q_i;
-            if (!interpolateState(frame.point_stamps[i], p_i, q_i)) {
+            if (!lookupScanPose(scan_traj, frame.point_stamps[i], p_i, q_i)) {
 
                 all_points_deskewed = false;
                 continue;
@@ -2029,10 +1974,7 @@ namespace nav_data_handle {
             const auto &src = frame.cloud->points[i];
             Eigen::Vector3d point_lidar(src.x, src.y, src.z);
             Eigen::Vector3d point_body = R_lidar_to_body_ * point_lidar;
-            Eigen::Vector3d point_world = q_i * point_body;
-
-            // 平移 deskew 必须等 GICP 通过后用校正位移做二次处理；这里仅做旋转 deskew。
-            Eigen::Vector3d point_ref_body = q_ref.conjugate() * point_world;
+            Eigen::Vector3d point_ref_body = q_ref.conjugate() * (q_i * point_body);
             Eigen::Vector3d point_ref_lidar = R_lidar_to_body_.transpose() * point_ref_body;
 
             frame.cloud->points[i].x = static_cast<float>(point_ref_lidar.x());
@@ -2321,7 +2263,6 @@ namespace nav_data_handle {
             if (!(std::isfinite(score) && score < icp_fitness_threshold_ &&
                 lidar_dt > 0.01 && lidar_dt < 1.0)) {
 
-                gicp_deskew_anchor_.ready = false;
                 clearGicpLocalSubmap();
                 resetGicpMap(cloud_for_gicp, msg->header.stamp);
                 publish_gicp_status(1.0);
@@ -2337,7 +2278,6 @@ namespace nav_data_handle {
                     RCLCPP_WARN_THROTTLE(
                         this->get_logger(), *this->get_clock(), 1000,
                         "ICP REJECTED: transform invalid det=%.3f", det);
-                    gicp_deskew_anchor_.ready = false;
                     clearGicpLocalSubmap();
                     resetGicpMap(cloud_for_gicp, msg->header.stamp);
                     publish_gicp_status(2.0);
@@ -2403,7 +2343,6 @@ namespace nav_data_handle {
                             "ICP REJECTED: |v_xy|=%.3f wz=%.3f "
                             "dyaw=%.3f yaw_innov=%.3f",
                             v_xy, w_icp.z(), delta_yaw_icp, yaw_innovation);
-                        gicp_deskew_anchor_.ready = false;
                         publish_gicp_status(3.0);
                     } else {
                         // 读取 ESKF 当前状态（state_mtx_ 保护并发写入）
@@ -2456,15 +2395,6 @@ namespace nav_data_handle {
                         const bool yaw_valid = yaw_gate;
 
                         if (velocity_valid && yaw_valid) {
-                            pcl::PointCloud<pcl::PointXYZ>::Ptr gicp_translation_deskewed_cloud;
-                            if (applyGicpTranslationDeskew(
-                                    frame, T, lidar_stamp_ns,
-                                    gicp_translation_deskewed_cloud)) {
-
-                                cloud_for_history = gicp_translation_deskewed_cloud;
-                            }
-                            // 显示叠图使用本帧实际参与 GICP 的旋转 deskew 点云。
-                            // post-GICP deskew 只用于历史匹配，避免把实验性补偿残影写入 RViz 地图。
                             updateGicpMap(cloud_for_gicp, T, msg->header.stamp);
                             Eigen::Matrix4d insert_prev_to_submap = prev_to_submap;
                             if (gicp_local_submap_frames_.empty() &&

@@ -239,11 +239,6 @@ namespace nav_data_handle {
             Eigen::Vector3d &p,
             Eigen::Quaterniond &q) const;
 
-        bool applyGicpTranslationDeskew(
-            const LidarFrame &frame,
-            const Eigen::Matrix4d &prev_to_current,
-            int64_t current_stamp_ns,
-            pcl::PointCloud<pcl::PointXYZ>::Ptr &corrected_cloud);
         bool estimateLidarMotion(
             int64_t source_stamp_ns, int64_t target_stamp_ns,
             Eigen::Matrix4d &source_to_target) const;
@@ -308,13 +303,6 @@ namespace nav_data_handle {
         double gicp_local_submap_leaf_size_ = 0.20;
         int gicp_local_submap_max_points_ = 80000;
         std::deque<LocalSubmapFrame> gicp_local_submap_frames_;
-        struct GicpDeskewAnchor {
-            bool ready = false;
-            int64_t stamp_ns = 0;
-            Eigen::Vector3d p = Eigen::Vector3d::Zero();
-            Eigen::Quaterniond q = Eigen::Quaterniond::Identity();
-        };
-        GicpDeskewAnchor gicp_deskew_anchor_;
         bool publish_gicp_map_ = true;
         double gicp_map_leaf_size_ = 0.10;
         int gicp_map_max_points_ = 300000;
@@ -327,7 +315,6 @@ namespace nav_data_handle {
         bool gicp_map_initialized_ = false;
         Eigen::Matrix4f gicp_init_guess_ = Eigen::Matrix4f::Identity();
         bool enable_lidar_deskew_ = true;
-        bool deskew_translation_ = false;
         double state_history_duration_ = 3.0;
         Eigen::Matrix<double, 4, 4> R_lidar_;
         Eigen::Matrix<double, 4, 4> icp_R_lidar_;  // 自适应缩放后的 R_lidar

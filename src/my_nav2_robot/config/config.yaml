@@ -58,8 +58,7 @@ data_handle_node:
     lidar.publish_aligned_cloud: false # 是否发布 /gicp/aligned_cloud，诊断掉帧时建议关闭
     lidar.max_points_before_gicp: 0     # GICP 前最大点数，0=不限制；用于诊断降负载
 
-    lidar.enable_deskew: true           # 使用每点 timestamp + IMU 姿态历史做旋转去畸变
-    lidar.deskew_translation: false      # GICP 通过后用校正位移二次补偿平移畸变
+    lidar.enable_deskew: true           # 使用每点 timestamp + scan 内 IMU 轨迹做旋转去畸变
     lidar.state_history_duration: 1.5   # deskew/初值使用的 ESKF 状态历史长度（秒）
     lidar.max_range: 80.0               # GICP 前点云最大半径，滤掉 deskew/异常点造成的远距离群
     lidar.min_voxel_leaf_size: 0.05     # GICP 内部体素叶大小下限，防止 PCL VoxelGrid int32 溢出
